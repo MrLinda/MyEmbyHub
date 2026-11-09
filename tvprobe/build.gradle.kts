@@ -5,13 +5,13 @@ plugins {
 // 零依赖模块：不引入任何 AndroidX / Compose，minSdk 尽量压低，
 // 目的是让 Android 4.x ~ 6.x 的老电视（如乐视 S50 Air EUI8）也能安装。
 android {
-    namespace = "com.example.tvprobe"
+    namespace = "work.luxiaoxiao.tvprobe"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.example.tvprobe"
+        applicationId = "work.luxiaoxiao.tvprobe"
         // 压到 16（Android 4.0.3），覆盖乐视 EUI3/EUI8 这类 Android 4.x~6.x 老电视
         minSdk = 16
         // 默认 23；部分厂商安装器对 targetSdk 有额外校验时，用 -PtvTargetSdk=16 打包

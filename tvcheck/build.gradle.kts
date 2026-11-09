@@ -11,13 +11,13 @@ plugins {
 // 关键约束：这台机器没有 WebView、没有 GMS、只支持 TLS 1.x（需显式开启 1.1/1.2），
 // 所以只能用 ExoPlayer 2.x（media3 要求 API 21）+ 原生 View，不能用 Compose。
 android {
-    namespace = "com.example.tvcheck"
+    namespace = "work.luxiaoxiao.tvcheck"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.example.tvcheck"
+        applicationId = "work.luxiaoxiao.tvcheck"
         minSdk = 18
         targetSdk = 23
         multiDexEnabled = true

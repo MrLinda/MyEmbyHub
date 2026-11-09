@@ -338,7 +338,7 @@ ExoPlayer 在 seek（找 `moov` / 定位），**每次 Range 都用新连接重�
 `app` 模块（TV 客户端）打包并装到电视上：
 
 ```
-/data/app/com.example.myembyhub-2.apk   8427317 字节   versionCode 1793710453
+/data/app/work.luxiaoxiao.myembyhub-2.apk   8427317 字节   versionCode 1793710453
 ```
 
 #### 5.9.1 写外置存储必须声明 `WRITE_EXTERNAL_STORAGE`（API 18 起强制）
@@ -346,7 +346,7 @@ ExoPlayer 在 seek（找 `moov` / 定位），**每次 Range 都用新连接重�
 「在线更新」报**下载失败**，真因是 **manifest 漏声明权限**，不是网络问题：
 
 ```bash
-aapt2 dump permissions /data/app/com.example.myembyhub-1.apk   # 装上去的旧包
+aapt2 dump permissions /data/app/work.luxiaoxiao.myembyhub-1.apk   # 装上去的旧包
 # → 只有 INTERNET / ACCESS_NETWORK_STATE / WAKE_LOCK / ACCESS_WIFI_STATE
 #   / CHANGE_WIFI_MULTICAST_STATE，**没有 WRITE_EXTERNAL_STORAGE**
 ```
@@ -383,8 +383,8 @@ http://192.168.1.50:8765/myembyhub-debug.apk
 判断有没有装上新包要比**文件大小/时间戳**：
 
 ```bash
-adb shell pm path com.example.myembyhub          # 先拿当前路径
-adb shell ls -l /data/app/com.example.myembyhub-2.apk
+adb shell pm path work.luxiaoxiao.myembyhub          # 先拿当前路径
+adb shell ls -l /data/app/work.luxiaoxiao.myembyhub-2.apk
 ```
 
 #### 5.9.4 ✅ 在线更新全链路实测通过（2026-11-03 21:06）
@@ -395,13 +395,13 @@ adb shell ls -l /data/app/com.example.myembyhub-2.apk
 I/PackageInstaller: [app][InstallAppProgress]:initCompleteView  sourceFile path : /sdcard/Download/myembyhub-update.apk
 W/PackageParser: apk on sdcard  sourceFile dir: /sdcard/Download/myembyhub-update.apk
 I/PackageInstaller: [app][InstallAppProgress]:Report str : msgtype=appinstall
-                   &packageName=com.example.myembyhub&versionCode=1793710453&status=0
+                   &packageName=work.luxiaoxiao.myembyhub&versionCode=1793710453&status=0
 I/PackageInstaller: [app][InstallAppProgress]:finish request is succeeded
 I/PackageInstaller: [app][InstallAppProgress]:sourceFile path : ... exists : true
 I/PackageInstaller: [app][InstallAppProgress]:==============delete done=============ourceFile.exists()==false
 ```
 
-安装后 `/data/app/com.example.myembyhub-2.apk` 时间戳从 20:56 变成 **21:06**、大小 8427317 → **确实重装成功**。
+安装后 `/data/app/work.luxiaoxiao.myembyhub-2.apk` 时间戳从 20:56 变成 **21:06**、大小 8427317 → **确实重装成功**。
 
 两个新事实：
 
@@ -443,7 +443,7 @@ I/PackageInstaller: [app][InstallAppProgress]:==============delete done=========
 
 ```bash
 # 触发（App 收到 intent extra cmd=diag 就自动跑矩阵）
-adb shell am start --user 0 -n com.example.tvcheck/.MainActivity \
+adb shell am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity \
     --es cmd diag --es host tv.example.com --ei port 443
 
 # 取结果

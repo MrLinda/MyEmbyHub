@@ -82,9 +82,6 @@ ExoPlayer 不跟重定向 → 自写 `DataSource` 读 `Location`、重建连接�
 # 正式 TV 客户端（产物在 app/build/outputs/apk/debug/）
 ./gradlew :app:assembleDebug
 
-# 电视上「在线更新」的清单（会自动写 dist/version.json）
-./gradlew :app:assembleDebug -PupdateHost=192.168.1.50:8765
-
 # 可行性验证工具：TLS 协商 / 播放解码能力探测
 ./gradlew :tvcheck:assembleDebug -PtvServerUrl=https://your-server:8096
 
@@ -96,6 +93,12 @@ ExoPlayer 不跟重定向 → 自写 `DataSource` 读 `Location`、重建连接�
 > 打包后要手动同步，否则电视在线更新会下载到旧包。
 >
 > ⚠️ `versionCode` 是**秒级时间戳**，永远递增才能覆盖安装。
+>
+> **在线更新地址**（写进 `dist/version.json` 的 `url`）按这个优先级取：
+> ① `-PupdateHost=host:port` 命令行参数 →
+> ② 本机 `local.properties` 里的 `updateHost=host:port`（**这个文件已 gitignore**，
+> 所以你本机的真实 IP 不会进仓库，仓库里只有占位符）→
+> ③ `app/build.gradle.kts` 里的默认值 `192.168.1.50:8765`（占位符）。
 
 ---
 
@@ -163,8 +166,33 @@ AGENTS.md            ⚠️ 平台踩坑全集——改代码前先读
 
 - 播放默认锁 **1080p**：4K HEVC 解码器能初始化但起播慢，在 1GHz 的 MStar 上体验很差。
 - HLS 未单独验证（媒体库主体是 mkv/mp4 直放）。
-- 包名仍是 `com.example.myembyhub`（历史原因，改名会断掉覆盖安装路径）。
 - 「最近观看」等接口依赖 Emby 4.8+ 的返回结构。
+
+---
+
+## 关于包名
+
+三个模块的包名是：
+
+| 模块 | 包名 |
+|---|---|
+| `app`（正式客户端） | `work.luxiaoxiao.myembyhub` |
+| `tvcheck`（TLS / 播放探针） | `work.luxiaoxiao.tvcheck` |
+| `tvprobe`（设备自检） | `work.luxiaoxiao.tvprobe` |
+
+**要改包名的话，有四处必须同步改**（漏一处就出事）：
+
+1. `*/build.gradle.kts` 的 `namespace` + `applicationId`；
+2. 源码目录结构 + 所有 `package` 声明和 `import`；
+3. ⚠️ **`app/proguard-rules.pro` 里的 `-keep class ...BuildConfig`** ——
+   这是最容易漏的：keep 规则写的是旧包名 → 新的 `BuildConfig` 根本没被 keep
+   → R8 优化掉 `VERSION_NAME` 字段 → `NoSuchFieldException`
+   → 「服务器信息」里客户端版本显示为空、**在线更新永远提示「有新版」**；
+4. `tools/*.ps1` 里的 `am start -n <包名>/.ui.LibraryActivity`。
+
+另外注意：**改 `applicationId` 等于换了一个新应用** ——
+电视上不能覆盖安装旧的（两个可以并存），而且 SharedPreferences 按包名隔离，
+**登录态会丢一次**，要重新扫码登录。
 
 ---
 

@@ -5,7 +5,7 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 [docs/tv-device-report.md](docs/tv-device-report.md)（电视实测底细）。
 
 > ⚠️ **本文件（以及整个仓库）里的服务器域名和 IP 都是占位符**：
-> 为了能公开发布，真实的 `自有域名` 域名、电视/电脑的内网 IP 全部替换成了
+> 为了能公开发布，真实的服务器域名、电视/电脑的内网 IP 全部替换成了
 > `example.com` / `192.168.1.x`。本机日常要用的真实地址在
 > **`AGENTS.local.md`**（同一份内容的私有副本，已 gitignore，不进仓库）。
 
@@ -127,7 +127,7 @@ tools\tv-diag.ps1
 
 ```bash
 # 触发：App 收到 cmd=diag 就自动跑完整 TLS 矩阵，结果写 /sdcard/tvcheck-tls.txt
-adb shell am start --user 0 -n com.example.tvcheck/.MainActivity \
+adb shell am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity \
     --es cmd diag --es host tv.example.com --ei port 443
 
 # 取结果
@@ -148,11 +148,11 @@ adb pull /sdcard/tvcheck-tls.txt dist/
 其它可用命令：
 
 ```bash
-adb shell am start --user 0 --activity-clear-top -n com.example.tvcheck/.MainActivity --es cmd login    # 自动登录
-adb shell am start --user 0 --activity-clear-top -n com.example.tvcheck/.MainActivity --es cmd decode   # 解码器探测
-adb shell am start --user 0 --activity-clear-top -n com.example.tvcheck/.MainActivity --es cmd stream   # 裸 SSLSocket 取流
-adb shell am start --user 0 --activity-clear-top -n com.example.tvcheck/.MainActivity --es cmd netplay  # 端到端网络实播
-adb shell am start --user 0 --activity-clear-top -n com.example.tvcheck/.MainActivity --es cmd httpprobe # HTTP 变体矩阵
+adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd login    # 自动登录
+adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd decode   # 解码器探测
+adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd stream   # 裸 SSLSocket 取流
+adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd netplay  # 端到端网络实播
+adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd httpprobe # HTTP 变体矩阵
 ```
 
 结果文件：`tvcheck-tls.txt` / `tvcheck-login.txt` / `tvcheck-decode.txt` /
@@ -263,6 +263,20 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   忘了的话运行时 `Class.forName("…BuildConfig")` 抛 `ClassNotFoundException`，
   兜底返回 0 → 在线更新会**永远提示「有新版」**（明明已经是最新）。
   `tvcheck` 模块有这行、`app` 模块一度漏了 —— 同一个坑的两面。
+- ⚠️ **改包名时，`proguard-rules.pro` 的 keep 规则必须同步改**（2026-11-09 实测）：
+  `-keep class <旧包名>.BuildConfig { *; }` 写死了包名，
+  改成新包名后这条 keep 就不再匹配 → 新的 `BuildConfig` **根本没被 keep**
+  → R8 优化掉 `VERSION_NAME` / `VERSION_CODE` 字段
+  → 运行时 `NoSuchFieldException` → 「服务器信息」里客户端版本显示为空、
+  在线更新又**永远提示「有新版」**。
+  → 改包名要同步改的**四处**：
+  ① `*/build.gradle.kts` 的 `namespace` + `applicationId`；
+  ② 源码目录 + 所有 `package` 声明 / `import`；
+  ③ **`app/proguard-rules.pro` 的 BuildConfig keep 规则**（最容易漏，
+  脚本按扩展名批量替换时 `.pro` 常常被漏掉）；
+  ④ `tools/*.ps1` 里的 `am start -n <包名>/.ui.LibraryActivity`。
+  → 症状：改完包名，「服务器信息」的「客户端版本」是空的。
+  → 验证：`adb logcat | Select-String BuildConfig` 看有没有 `NoSuchFieldException`。
 - ⚠️ **zxing 必须用 3.2.1**：3.3.0+ 的 `qrcode.encoder.Encoder` 静态初始化引用
   `java.nio.charset.StandardCharsets`（**API 19 才有**）→ Android 4.3 上
   `NoClassDefFoundError`，二维码画不出来。3.2.1 全库 0 处引用，API 18 安全。

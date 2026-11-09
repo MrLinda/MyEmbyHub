@@ -42,7 +42,7 @@ Write-Host "==> 目标: $Host_ : $Port" -ForegroundColor Cyan
 & $adb -s $Ip shell "rm -f /sdcard/tvcheck-tls.txt" | Out-Null
 
 # 1) 触发自动诊断
-$cmd = "am start --user 0 -n com.example.tvcheck/.MainActivity --es cmd diag --es host $Host_ --ei port $Port"
+$cmd = "am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd diag --es host $Host_ --ei port $Port"
 & $adb -s $Ip shell $cmd | Out-Null
 Write-Host "==> 已触发，等待结果…" -ForegroundColor Cyan
 

@@ -81,11 +81,11 @@ if (-not $SkipInstall) {
     Write-Host "`n=== 安装 ===" -ForegroundColor Yellow
     & $adb -s $serial install -r -t $apk
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "`n安装失败。常见原因：签名冲突（先 uninstall com.example.tvprobe）、电视存储不足、系统版本低于 minSdk 19。" -ForegroundColor Red
+        Write-Host "`n安装失败。常见原因：签名冲突（先 uninstall work.luxiaoxiao.tvprobe）、电视存储不足、系统版本低于 minSdk 19。" -ForegroundColor Red
         exit 1
     }
 
     Write-Host "`n=== 启动 ===" -ForegroundColor Yellow
-    & $adb -s $serial shell am start -n com.example.tvprobe/.MainActivity
+    & $adb -s $serial shell am start -n work.luxiaoxiao.tvprobe/.MainActivity
     Write-Host "`n已在电视上打开 TV Probe，屏幕上会大字显示 Android 版本。" -ForegroundColor Green
 }

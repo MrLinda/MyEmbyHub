@@ -11,17 +11,22 @@
 # ---------------------------------------------------------------------------
 # 1. BuildConfig —— 被反射读取，R8 看不到这条引用
 #
-# UpdateManager.kt:188  Class.forName("com.example.myembyhub.BuildConfig")
+# UpdateManager.kt:188  Class.forName("work.luxiaoxiao.myembyhub.BuildConfig")
 # UpdateManager.kt:189  cls.getField("VERSION_CODE")
-# UpdateManager.kt:201  Class.forName("com.example.myembyhub.BuildConfig")
+# UpdateManager.kt:201  Class.forName("work.luxiaoxiao.myembyhub.BuildConfig")
 # UpdateManager.kt:202  cls.getField("VERSION_NAME")
 #
 # 一旦被裁掉或改名：运行时 ClassNotFoundException / NoSuchFieldException →
 # 兜底返回 0 → 在线更新**永远提示「有新版本」**（明明已经是最新）。
 # 这个坑在 AGP 8.0 忘记开 buildConfig 时已经踩过一次，不能再来第二次。
+#
+# ⚠️ **改包名时这里必须同步改**（2026-11-09 实测）：
+#    keep 规则写的是旧包名 → 新的 BuildConfig 根本没被 keep
+#    → R8 优化掉 VERSION_NAME 字段 → NoSuchFieldException
+#    → 「服务器信息」里的客户端版本显示为空。
 # ---------------------------------------------------------------------------
--keep class com.example.myembyhub.BuildConfig { *; }
--keepclassmembers class com.example.myembyhub.BuildConfig {
+-keep class work.luxiaoxiao.myembyhub.BuildConfig { *; }
+-keepclassmembers class work.luxiaoxiao.myembyhub.BuildConfig {
     public static final int VERSION_CODE;
     public static final java.lang.String VERSION_NAME;
 }

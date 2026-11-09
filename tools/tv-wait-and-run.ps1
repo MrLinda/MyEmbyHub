@@ -56,7 +56,7 @@ $deadline = (Get-Date).AddMinutes($WaitInstallMin)
 $installed = $false
 while ((Get-Date) -lt $deadline) {
     & $adb -s $Ip shell "rm -f /sdcard/tvcheck-decode.txt" | Out-Null
-    & $adb -s $Ip shell "am start --user 0 -n com.example.tvcheck/.MainActivity --es cmd decode" | Out-Null
+    & $adb -s $Ip shell "am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd decode" | Out-Null
     Start-Sleep -Seconds 50
     $r = & $adb -s $Ip shell "cat /sdcard/tvcheck-decode.txt" 2>&1
     if ($r -and ($r -match '解码器探测')) { $installed = $true; break }
@@ -78,7 +78,7 @@ $probes = @(
 foreach ($p in $probes) {
     Say "跑探针 cmd=$($p.cmd) …"
     & $adb -s $Ip shell "rm -f /sdcard/$($p.file)" | Out-Null
-    & $adb -s $Ip shell "am start --user 0 -n com.example.tvcheck/.MainActivity --es cmd $($p.cmd)" | Out-Null
+    & $adb -s $Ip shell "am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd $($p.cmd)" | Out-Null
     # 等文件出现
     $ok = $false
     for ($i = 0; $i -lt 20; $i++) {

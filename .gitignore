@@ -18,6 +18,9 @@ local.properties
 *.aab
 *.ap_
 *.dex
+# javac 直接编译的探针工具产物
+tools/tlsprobe/out/
+tools/tlsprobe/out2/
 
 # ---------- 交付产物目录 ----------
 # dist/ 里全是 APK、诊断日志和**带账号密码的 conf**（见下），一律不进仓库

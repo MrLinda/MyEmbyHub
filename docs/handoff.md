@@ -4,7 +4,7 @@
 
 ## 一句话状态
 
-**可行性验证 100% 完成**，**TV 客户端已交付并装到电视上**（`com.example.myembyhub`，
+**可行性验证 100% 完成**，**TV 客户端已交付并装到电视上**（`work.luxiaoxiao.myembyhub`，
 versionCode 1793710453，8,427,317 字节）。
 当前唯一待办：**在电视上点一次「在线更新 → 下载」**，验证下载链路（权限坑已修，待真机确认）。
 
@@ -21,7 +21,7 @@ versionCode 1793710453，8,427,317 字节）。
 | 302 目标 | `v10.example.com` / `v11.example.com`（**多节点，域名会变**，必须动态跟随） | 5.6.2 |
 | 网络实播 | ✅ READY / 1080p / 硬解 / 零丢帧（mkv+hevc / mp4+h264 / mkv+h264） | 5.7 节 |
 | 不需要 Conscrypt/BC | BC 在 API 18 不可用（JSSE 类在 `META-INF/versions/9/`） | 5.5 节 |
-| 客户端已装电视 | 8,427,317 字节，versionCode 1793710453 | `adb shell ls -l /data/app/com.example.myembyhub-2.apk` |
+| 客户端已装电视 | 8,427,317 字节，versionCode 1793710453 | `adb shell ls -l /data/app/work.luxiaoxiao.myembyhub-2.apk` |
 
 ## 客户端已实现的功能
 
@@ -86,8 +86,8 @@ versionCode 1793710453，8,427,317 字节）。
 所以判断"有没有装上新包"要**比 APK 文件大小/时间戳**：
 
 ```bash
-adb shell pm path com.example.myembyhub          # 先拿当前路径（-1 / -2 会变）
-adb shell ls -l /data/app/com.example.myembyhub-2.apk
+adb shell pm path work.luxiaoxiao.myembyhub          # 先拿当前路径（-1 / -2 会变）
+adb shell ls -l /data/app/work.luxiaoxiao.myembyhub-2.apk
 ```
 
 ## 部署到电视的流程（已知无法绕过系统限制）

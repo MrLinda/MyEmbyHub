@@ -1,19 +1,20 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
 }
 
 android {
-    namespace = "com.example.myembyhub"
+    namespace = "work.luxiaoxiao.myembyhub"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.example.myembyhub"
+        applicationId = "work.luxiaoxiao.myembyhub"
         // 目标电视是乐视 S50 Air：Android 4.3 / API 18 → minSdk 只能到 18
         minSdk = 18
         // targetSdk 保持 23：API 24+ 在 4.3 系统上会引入未预期的行为变化
@@ -71,7 +72,7 @@ android {
 
     buildFeatures {
         // ⚠️ 必须显式开启：**AGP 8.0 起 BuildConfig 不再自动生成**。
-        //    没有它 → `com.example.myembyhub.BuildConfig` 运行时不存在 →
+        //    没有它 → `work.luxiaoxiao.myembyhub.BuildConfig` 运行时不存在 →
         //    反射读 VERSION_CODE 抛 ClassNotFoundException → 兜底返回 0 →
         //    在线更新会永远认为「有新版本」。
         buildConfig = true
@@ -101,10 +102,19 @@ dependencies {
 // 大于就下载 APK 并调起系统安装器。
 // 电脑上用 `python -m http.server 8765` 把 dist/ 目录发出去即可。
 //
-// 换网络时改这里的 updateHost（或用 -PupdateHost=host:port 覆盖）：
-//   gradlew :app:assembleDebug -PupdateHost=192.168.1.20:8765
+// 换网络时改这里的 updateHost，优先级：
+//   ① 命令行 -PupdateHost=host:port
+//   ② 本机 local.properties 里的 updateHost=host:port（**local.properties 已 gitignore**，
+//      所以本机真实 IP 不会进仓库，仓库里只有占位符）
+//   ③ 下面的默认值（占位符）
 // ============================================================================
-val updateHost = (project.findProperty("updateHost") as String?) ?: "192.168.1.50:8765"
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val updateHost = (project.findProperty("updateHost") as String?)
+    ?: localProps.getProperty("updateHost")
+    ?: "192.168.1.50:8765"
 
 tasks.matching { it.name == "assembleDebug" }.configureEach {
     doLast {
