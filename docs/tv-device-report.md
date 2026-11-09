@@ -3,6 +3,9 @@
 > 数据采集时间：2026-11-02（晚）
 > 采集方式：`tvprobe`（电视上运行的系统信息探针）+ `adb shell` + `getprop`
 > 用途：这是 MyEmbyHub 全部技术选型的依据，改客户端前请先核对本文档。
+>
+> ℹ️ 采集时用到的 `tvprobe` / `tvcheck` 两个探针模块**已在验证通过后从仓库删除**，
+> 本文保留它们的原始记录以说明数据来源；相关实现已经搬进 `app`。
 
 ## 1. 身份
 
@@ -67,7 +70,7 @@
 
 - Android 4.3 **默认只启用 TLS 1.0**；1.1/1.2 需显式开启（`Tls12SocketFactory` 已实现）。
 - 系统 CA 库为 2013 年版本，**不认现代根证书**（Let's Encrypt 等）。
-  → 正式客户端需要自带 CA（`tvcheck` 已内置 LE 锚点）或引入 Conscrypt。
+  → 正式客户端需要自带 CA（`app` 已内置 LE 锚点）或引入 Conscrypt。
 
 ### 5.2 目标服务器 tv.example.com（公网）
 
@@ -418,38 +421,36 @@ I/PackageInstaller: [app][InstallAppProgress]:==============delete done=========
 
 ## 7. 相关文件
 
+> ⚠️ 采集本文数据时用过的两个探针模块（`tvprobe` / `tvcheck`）在验证全部通过后
+> **已从仓库删除**，本文保留它们的原始记录以说明数据来源。相关实现已经搬进 `app`。
+
 | 文件 | 说明 |
 |---|---|
-| `tvprobe/` | 系统信息探针模块（Java 零依赖，minSdk 16） |
-| `tvcheck/` | 可行性验证模块（Kotlin + ExoPlayer 2.19.1，minSdk 18） |
-| `tvcheck/src/main/java/.../TlsMatrix.kt` | **TLS 自动诊断矩阵**，结果写 `/sdcard/tvcheck-tls.txt` |
-| `tvcheck/src/main/java/.../EmbyHttpDataSource.kt` | **自写的 ExoPlayer `DataSource`**：TLS + 手写 HTTP + 跟随 302 + Range |
-| `tvcheck/src/main/java/.../NetPlayProbe.kt` | 端到端网络播放探针，结果写 `/sdcard/tvcheck-netplay.txt` |
-| `tvcheck/src/main/java/.../TlsStack.kt` | TLS 栈工厂（系统 JSSE / BC 可选）+ TLS1.2 协议抬高 |
-| `tvcheck/src/main/assets/` | 内置 H.264 / HEVC 测试样片（10s / 640×360）+ LE 锚点证书 |
-| `tvcheck/src/test/` | 配置服务单元测试 |
-| `dist/` | 交付产物：APK、conf 模板、html 工具 |
-| `tools/tvprobe-install.ps1` | USB 安装 + 读系统版本 |
-| `tools/tv-diag.ps1` | **一键诊断**：adb 触发电视端 TLS 矩阵并把结果拉回电脑 |
+| `app/src/main/java/.../net/TlsStack.kt` | TLS 栈工厂（系统 JSSE）+ TLS1.2 协议抬高 |
+| `app/src/main/java/.../net/BundledCa.kt` | 内置 LE 锚点 + 手写逐级验签 |
+| `app/src/main/java/.../net/EmbyHttpDataSource.kt` | **自写的 ExoPlayer `DataSource`**：TLS + 手写 HTTP + 跟随 302 + Range |
+| `app/src/main/java/.../net/UrlKit.kt` | 手工 URL / 重定向解析（有单元测试） |
+| `app/src/main/assets/*.pem` | 内置 LE 锚点证书 |
+| `app/src/test/.../net/UrlKitTest.kt` | URL 解析回归测试（7 个用例） |
+| `dist/` | 交付产物：APK、在线更新清单 |
 | `tools/tls-capture.py` | TCP 转发 + ClientHello 抓包（同时捕获服务端 alert） |
 | `tools/tlsprobe/` | 纯 Java TLS 探针源码（本机 dalvikvm 加载被 ROM 阉割，未采用） |
 | `tools/serve-dist.ps1` | 静态服务（PowerShell 版，需管理员；推荐改用 `python -m http.server`） |
-| `tools/make-icons.ps1` | 生成图标 / banner |
 
-### 7.1 诊断自动化（重要工作流）
+### 7.1 诊断自动化（历史工作流，探针已删除）
 
 这台电视的 `screencap` 输出 0 字节、shell 无 DUMP 权限，**没法自动取界面**，
-所以「在电视上点按钮 + 拍照回传」不可扩展。所有验证都改成文件驱动：
+所以当时「在电视上点按钮 + 拍照回传」不可扩展，验证全部改成文件驱动 —— 由 `tvcheck`
+的 `cmd=diag` 入口跑 TLS 矩阵、结果写 `/sdcard/tvcheck-tls.txt` 再 `adb pull` 回来。
 
 ```bash
-# 触发（App 收到 intent extra cmd=diag 就自动跑矩阵）
+# 触发（探针 App 收到 intent extra cmd=diag 就自动跑矩阵）
 adb shell am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity \
     --es cmd diag --es host tv.example.com --ei port 443
 
 # 取结果
 adb shell cat /sdcard/tvcheck-tls.txt
-# 或直接用脚本一步到位
-tools/tv-diag.ps1
 ```
 
-> 新增 App 版本后，只要装一次，之后所有 TLS 实验都不需要人操作。
+> 这套探针已经随 `tvcheck` 模块删除。现在验证正式客户端靠
+> `adb shell am start` + `adb logcat` + `uiautomator dump`（见 `AGENTS.md` 4.1）。

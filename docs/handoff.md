@@ -1,5 +1,11 @@
 # 进度交接（截至 2026-11-03 21:00）
 
+> ⚠️ **历史文档**。这是 TV 客户端刚交付那天的交接快照，保留是为了记录当时的结论与踩坑。
+> 其中提到的 `tvcheck` / `tvprobe` 两个探针模块**已从仓库删除**，
+> `tvcheck` 里的 `UrlKit` 回归测试已迁到 `app/src/test/`；
+> 电视上的运行时 conf（`/sdcard/tvcheck.conf`）也随探针一起没有了。
+> 现在的状态和坑位看 [`AGENTS.md`](../AGENTS.md) 与 [`README.md`](../README.md)。
+>
 > 给明天的自己 / 接手的人。**先读这个，再读 `docs/tv-client-plan.md`（功能与坑）、`docs/tv-device-report.md`（真机底细）。**
 
 ## 一句话状态
@@ -38,7 +44,8 @@ versionCode 1793710453，8,427,317 字节）。
 | 播放页：ExoPlayer 2.19.1 + 自写 DataSource，左右键 ±10s | ✅ 待在电视上肉眼确认出画面 |
 | 在线更新：清单比对 → 下载 APK → 调起系统安装器 | ✅ **全链路实测通过**（21:06，`status=0`，覆盖安装成功） |
 
-网络层已从 `tvcheck` **复制**进 `app/.../net/`（**没有抽公共模块**，避免改动已验证的探针代码）：
+网络层最初是从 `tvcheck` 探针**复制**进 `app/.../net/` 的（**没有抽公共模块**，避免改动已验证的探针代码），
+探针模块后来删掉了，这份拷贝就是现在的线上实现：
 
 `TlsStack` / `BundledCa` / `UrlKit` / `EmbyHttpDataSource` / `TrustMode` / `EmbyApi` /
 `Session` / `QrUtil` / `UpdateManager` / `ImageLoader` / `PhoneControlServer`
@@ -70,13 +77,13 @@ versionCode 1793710453，8,427,317 字节）。
 - 电脑静态服务：`python -m http.server 8765` 在 `dist/` 目录跑着。
   **端口 8000 落在 Windows 保留段 7928-8027，绑定报 `WinError 10013`，统一用 8765。**
 - 电视 adb：`192.168.1.100:5555`（深度待机时 5555 会关，需用户按遥控器唤醒，按「信号源」最有效）。
-- 电视 conf：`/sdcard/tvcheck.conf`，已含 `api_key`（32 位）、`server`、`username`、`password`、
-  `apk_url`。**注意 conf 里有明文密码，不要把它贴到公开地方。**
-  ⚠️ **`dist/tvcheck.conf` 是模板**（内容是空占位），
+- ~~电视 conf：`/sdcard/tvcheck.conf`，已含 `api_key`（32 位）、`server`、`username`、`password`、
+  `apk_url`。~~ ⚠️ **`dist/tvcheck.conf` 是模板**（内容是空占位），
   运行时配置在 **`dist/tvcheck-runtime.conf`** —— 推电视时**只能推 runtime 那份**，
   推错会把真实的 server/token/密码冲掉（2026-11-03 踩过，已恢复）。
-- 触发探针**必须加 `--activity-clear-top`**，否则 shell 发起的 `am start` 带的
-  `FLAG_ACTIVITY_NEW_TASK` 会吞掉 extras，`cmd` 根本不送达。
+  （**已失效**：这套运行时 conf 属于 `tvcheck` 探针，模块删除后没有了；
+  正式客户端的服务器地址走登录界面输入 / 手机扫码登录。）
+- ~~触发探针**必须加 `--activity-clear-top`**~~（探针已删除）。
 - ⚠️ **Gradle 的 `assembleDebug` 只生成 `dist/version.json`，不拷 APK 到 `dist/`** →
   打包后要手动 `python -c "import shutil; shutil.copy(...)"` 同步，否则电视下载到旧包。
 

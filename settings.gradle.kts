@@ -24,5 +24,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "MyEmbyHub"
 include(":app")
-include(":tvprobe")
-include(":tvcheck")

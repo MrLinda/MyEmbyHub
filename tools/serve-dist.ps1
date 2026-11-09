@@ -1,17 +1,18 @@
 <#
 .SYNOPSIS
-    把 dist 目录用 HTTP 暴露出去，供电视上的 TV Check 在线下载 APK。
+    把 dist 目录用 HTTP 暴露出去，供电视上的 MyEmbyHub 在线下载 APK。
 
 .EXAMPLE
     .\tools\serve-dist.ps1
-    .\tools\serve-dist.ps1 -Port 8000
+    .\tools\serve-dist.ps1 -Port 8765
 
 .NOTES
-    电视上的 TV Check → 「下载并安装新版本」→ 填 http://<本机IP>:8000/tvcheck-debug.apk
+    电视上的 MyEmbyHub → 「在线更新」→ 填 http://<本机IP>:8765/myembyhub-debug.apk
     本机 IP 可用 ipconfig 查看（要和电视在同一个 WiFi 下）。
+    ⚠️ 端口 8000 落在 Windows 保留段 7928-8027，绑定会报 WinError 10013 → 统一用 8765。
 #>
 param(
-    [int]$Port = 8000,
+    [int]$Port = 8765,
     [string]$Root = (Join-Path $PSScriptRoot '..\dist')
 )
 

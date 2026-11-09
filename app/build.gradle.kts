@@ -77,6 +77,15 @@ android {
         //    在线更新会永远认为「有新版本」。
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            // 单元测试跑在 JVM 上，android.jar 里的方法全是桩（抛
+            // "not mocked" RuntimeException）。返回默认值而不是抛异常，
+            // 纯逻辑代码（UrlKit 等）就能直接跑。
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -93,6 +102,9 @@ dependencies {
 
     // 二维码生成（纯 Java 库，API 18 可用）
     implementation(libs.zxing.core)
+
+    // 单元测试：目前只有 UrlKit 的回归测试（手写 URL / 重定向解析）
+    testImplementation(libs.junit)
 }
 
 // ============================================================================

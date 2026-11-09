@@ -1,4 +1,4 @@
-package work.luxiaoxiao.tvcheck
+package work.luxiaoxiao.myembyhub.net
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -39,11 +39,11 @@ class UrlKitTest {
 
     @Test
     fun `显式端口要解析出来`() {
-        val p = UrlKit.parse("http://192.168.1.50:8765/tvcheck-debug.apk")
+        val p = UrlKit.parse("http://192.168.1.50:8765/myembyhub-debug.apk")
         assertEquals("http", p.scheme)
         assertEquals("192.168.1.50", p.host)
         assertEquals(8765, p.port)
-        assertEquals("/tvcheck-debug.apk", p.path)
+        assertEquals("/myembyhub-debug.apk", p.path)
     }
 
     @Test

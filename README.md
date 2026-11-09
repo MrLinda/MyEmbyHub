@@ -82,11 +82,8 @@ ExoPlayer 不跟重定向 → 自写 `DataSource` 读 `Location`、重建连接�
 # 正式 TV 客户端（产物在 app/build/outputs/apk/debug/）
 ./gradlew :app:assembleDebug
 
-# 可行性验证工具：TLS 协商 / 播放解码能力探测
-./gradlew :tvcheck:assembleDebug -PtvServerUrl=https://your-server:8096
-
-# 电视自检工具：读系统版本、机型、内存、WebView、GMS
-./gradlew :tvprobe:assembleDebug
+# 单元测试（目前只有 UrlKit 的 URL / 重定向解析回归测试）
+./gradlew :app:testDebugUnitTest
 ```
 
 > ⚠️ `assembleDebug` **只生成 `dist/version.json`，不会把 APK 拷进 `dist/`**，
@@ -137,25 +134,28 @@ App 比对自己的 `versionCode`，有新版就下载 APK 并调起系统安装
 
 ## 模块
 
+仓库只有一个模块：
+
 | 模块 | 语言 | minSdk | 作用 |
 |---|---|---|---|
 | `app` | Kotlin + XML/Views | 18 | **正式 TV 客户端**：登录 / 媒体库 / 播放 / 搜索 / 排序 / 在线更新 |
-| `tvcheck` | Kotlin + ExoPlayer 2.19.1 | 18 | **可行性验证工具**：TLS 协商矩阵 + 播放解码能力 + 远程配置 |
-| `tvprobe` | Java，零依赖 | 16 | 电视自检：系统版本 / 机型 / 内存 / WebView / GMS |
 
 UI 全部是 XML/Views——**Compose 要求 minSdk 21**，这台电视装不上。
 焦点导航同理，`androidx.tv` / `tv-material` 也要 API 21，只能自己实现。
+
+> 早期还有一个 `tvcheck`（TLS / 解码探针）和一个 `tvprobe`（设备自检）模块，
+> 用来在没有真机反馈时做可行性验证。真机验证全部通过后它们就只剩历史价值了，
+> 已删除；`tvcheck` 里唯一有长期价值的东西——`UrlKit` 的回归测试——
+> 已经迁到 `app/src/test/`。
 
 ---
 
 ## 目录
 
 ```
-app/                 正式客户端
-tvcheck/             验证工具
-tvprobe/             自检工具
+app/                 正式客户端（app/src/test/ 是 UrlKit 的回归测试）
 docs/                设备实测报告、交接文档、截图
-tools/               辅助脚本（tv-diag.ps1 一条龙跑完 TLS 矩阵并把结果拉回电脑）
+tools/               辅助脚本（serve-dist.ps1 把 dist/ 发出去给电视在线更新）
 dist/                交付产物（已 gitignore：里面是 APK 和带凭据的 conf）
 AGENTS.md            ⚠️ 平台踩坑全集——改代码前先读
 ```
@@ -172,17 +172,11 @@ AGENTS.md            ⚠️ 平台踩坑全集——改代码前先读
 
 ## 关于包名
 
-三个模块的包名是：
-
-| 模块 | 包名 |
-|---|---|
-| `app`（正式客户端） | `work.luxiaoxiao.myembyhub` |
-| `tvcheck`（TLS / 播放探针） | `work.luxiaoxiao.tvcheck` |
-| `tvprobe`（设备自检） | `work.luxiaoxiao.tvprobe` |
+包名是 `work.luxiaoxiao.myembyhub`（域名反写，按你自己的域名改）。
 
 **要改包名的话，有四处必须同步改**（漏一处就出事）：
 
-1. `*/build.gradle.kts` 的 `namespace` + `applicationId`；
+1. `app/build.gradle.kts` 的 `namespace` + `applicationId`；
 2. 源码目录结构 + 所有 `package` 声明和 `import`；
 3. ⚠️ **`app/proguard-rules.pro` 里的 `-keep class ...BuildConfig`** ——
    这是最容易漏的：keep 规则写的是旧包名 → 新的 `BuildConfig` 根本没被 keep

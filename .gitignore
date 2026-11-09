@@ -38,8 +38,6 @@ tools/tlsprobe/out2/
 *.conf.*
 conf-backup.txt
 write_conf.py
-# 例外：保留干净的配置模板
-!/tvcheck/src/main/assets/tvcheck.conf.template
 
 # ---------- 其它本机痕迹 ----------
 *.log

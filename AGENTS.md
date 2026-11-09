@@ -46,8 +46,8 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 由此得出三条硬性要求：
 
 1. Android 4.3 **默认只启用 TLS 1.0**，必须显式开启 1.1/1.2。
-   `tvcheck` 里已实现 `TlsStack.forceTls12`（包一层 `SSLSocketFactory` 抬高 enabledProtocols）。
-2. **必须自带锚点证书**。`tvcheck/src/main/assets/` 已内置 `isrg_root_x1.pem`、
+   `app` 的 `net/TlsStack.kt` 里已实现 `forceTls12`（包一层 `SSLSocketFactory` 抬高 enabledProtocols）。
+2. **必须自带锚点证书**。`app/src/main/assets/` 已内置 `isrg_root_x1.pem`、
    `isrg_root_yr.pem`、`letsencrypt_yr2.pem`，由 `BundledCa.kt` 手写逐级验签
    （不用 KeyStore，老系统上 KeyStore 类型支持参差不齐）。
 3. ~~如果 4.3 连 AES 套件都协商不出来，就得上 Conscrypt~~
@@ -70,19 +70,22 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 
 ## 3. 模块结构
 
+仓库只有一个模块：
+
 | 模块 | 语言 | minSdk | 作用 |
 |---|---|---|---|
 | `app` | Kotlin + XML/Views | 18 | **正式 TV 客户端**（已改造并装到电视上）：登录/媒体库/播放/搜索/排序/在线更新 |
-| `tvprobe` | Java，零依赖 | 16 | 电视自检工具：读系统版本/机型/内存/WebView/GMS |
-| `tvcheck` | Kotlin + ExoPlayer 2.19.1 | 18 | **可行性验证工具**：TLS 协商 + 播放/解码能力 + 5102 远程配置 + 在线更新 |
 
 `app` 模块的 UI 是 XML/Views（**不是 Compose**，Compose 要 API 21），
-网络层在 `app/src/main/java/com/example/myembyhub/net/`：
+网络层在 `app/src/main/java/work/luxiaoxiao/myembyhub/net/`：
 `TlsStack` / `BundledCa` / `UrlKit` / `EmbyHttpDataSource` / `TrustMode` /
 `EmbyApi` / `Session` / `QrUtil` / `UpdateManager` / `ImageLoader` / `PhoneControlServer`。
-这些实现是从 `tvcheck` **复制**过来的（没抽公共模块，避免改动已验证的探针代码）。
 
-`dist/` 是交付产物目录（APK、conf 模板、html 工具）；`tools/` 是辅助脚本。
+> 历史上还有两个探针模块：`tvcheck`（TLS 协商 / 播放解码 / 5102 远程配置）和
+> `tvprobe`（设备自检，零依赖 Java）。真机验证全部通过后已删除，
+> `tvcheck` 里唯一长期有价值的 `UrlKit` 回归测试已迁到 `app/src/test/`。
+
+`dist/` 是交付产物目录（APK、在线更新清单 `version.json`）；`tools/` 是辅助脚本。
 
 > ⚠️ `gradlew :app:assembleDebug` **只生成 `dist/version.json`，不会把 APK 拷进 `dist/`** ——
 > 打包后要手动同步（`python -c "import shutil; shutil.copy(...)"`），
@@ -104,59 +107,43 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 set JAVA_HOME=E:\Programs\Android\Android Studio\jbr
 gradlew :app:assembleDebug                        # 正式 TV 客户端（会自动生成 dist/version.json）
 gradlew :app:assembleDebug -PupdateHost=1.2.3.4:8765   # 把更新源烤进清单
-gradlew :tvcheck:assembleDebug                    # 电视工具
-gradlew :tvcheck:assembleDebug -PtvServerUrl=https://xxx   # 把默认服务器地址烤进 APK
-gradlew :tvprobe:assembleDebug -PtvTargetSdk=16  # 探针，targetSdk 可切 16/23
-gradlew :tvcheck:testDebugUnitTest                # 配置服务的单元测试（不需要电视）
+gradlew :app:testDebugUnitTest                    # UrlKit 的 URL / 重定向解析回归测试（不需要电视）
 
 # 电脑端静态服务（给电视在线下载 APK 用）
 cd dist && python -m http.server 8765 --bind 0.0.0.0
 # ⚠️ 端口 8000 落在 Windows 保留段 7928-8027，绑定报 WinError 10013 → 统一用 8765
-
-# 电视端 TLS 自动诊断（一步到位，结果拉回电脑）
-tools\tv-diag.ps1
 ```
 
-> `gradle.properties` 里 **configuration cache 是关闭的**：`tvcheck` 每次打包要在配置期算
+> `gradle.properties` 里 **configuration cache 是关闭的**：`app` 每次打包要在配置期算
 > 时间戳版本号，configuration cache 会把配置期的值缓存住，导致 versionName 不刷新。
 
-### 4.1 自动诊断工作流（强烈推荐，别再拍照回传）
+### 4.1 真机验证方式
 
 这台电视 `screencap` 输出 0 字节、shell 无 DUMP 权限，**没法自动取界面截图**。
-所以所有验证都改成「intent 触发 → 结果写文件 → adb 拉回」：
+所以验证靠这几招：
 
 ```bash
-# 触发：App 收到 cmd=diag 就自动跑完整 TLS 矩阵，结果写 /sdcard/tvcheck-tls.txt
-adb shell am start --user 0 -n work.luxiaoxiao.tvcheck/.MainActivity \
-    --es cmd diag --es host tv.example.com --ei port 443
+# 1) 拉起界面（不用装新包就能复现已装版本的行为）
+adb shell am start -n work.luxiaoxiao.myembyhub/.ui.LibraryActivity
 
-# 取结果
-adb shell cat /sdcard/tvcheck-tls.txt
-adb pull /sdcard/tvcheck-tls.txt dist/
+# 2) 看日志（崩溃、异常都从这里抓）
+adb logcat | Select-String -Pattern 'myembyhub|AndroidRuntime|FATAL'
+
+# 3) 看界面层级（代替截图：能拿到文本、bounds、selected 状态）
+adb shell uiautomator dump /data/local/tmp/w.xml
+adb pull /data/local/tmp/w.xml dist/
 ```
 
-或者直接 `tools\tv-diag.ps1`（触发 + 等待 + 拉取 + 打印一条龙）。
-**装好新版 tvcheck 之后，后续所有真机实验都不需要人操作。**
-
-> ⚠️ **触发命令必须加 `--activity-clear-top`**：
-> `adb shell am start` 从 shell 发起默认带 `FLAG_ACTIVITY_NEW_TASK`，
-> 系统判定 intent「相同」就只把任务带到前台，**extras 被丢弃** → `cmd` 根本不送达，
-> 而且日志里连 `handleCommand` 都不会打印。
-> 正确写法：`am start --user 0 --activity-clear-top -n <组件> --es cmd <cmd>`。
-> 现象：`Warning: Activity not started, its current task has been brought to the front`。
-
-其它可用命令：
-
-```bash
-adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd login    # 自动登录
-adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd decode   # 解码器探测
-adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd stream   # 裸 SSLSocket 取流
-adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd netplay  # 端到端网络实播
-adb shell am start --user 0 --activity-clear-top -n work.luxiaoxiao.tvcheck/.MainActivity --es cmd httpprobe # HTTP 变体矩阵
-```
-
-结果文件：`tvcheck-tls.txt` / `tvcheck-login.txt` / `tvcheck-decode.txt` /
-`tvcheck-stream.txt` / `tvcheck-netplay.txt` / `tvcheck-http.txt`，都在 `/sdcard/`。
+> ⚠️ **模拟器上截图能取到，真机上不行** —— UI 改动先在模拟器上截图看效果，
+> 再推真机用 `uiautomator dump` 验层级。
+> 解析 bounds 要用 `[regex]::Match($a.bounds,'\[(\d+),')`，
+> 用 `-replace '\D',' '` split 取 index 0 会拿到空串导致误判。
+>
+> ⚠️ `adb shell input keyevent` **无法操作别的应用的窗口**：
+> `input` 是从 shell 进程（uid 2000）注入，目标是别的 uid（如系统安装器 uid 10014）时会报
+> `SecurityException: Injecting to another application requires INJECT_EVENTS permission`。
+> → **弹系统安装器/系统对话框时只能靠人按遥控器**，脚本按键无效。
+> → 但对本 App 自己的界面，`input keyevent` / `input touchscreen swipe` 是可以用的。
 
 ---
 
@@ -174,21 +161,14 @@ adb connect 192.168.1.100:5555
 
 ```bash
 # 1) 推送
-adb push tvcheck-debug.apk /sdcard/Download/tvcheck.apk
+adb push dist/myembyhub-debug.apk /sdcard/Download/myembyhub.apk
 # 2) 调起系统安装器（电视上需要人按一次「安装」）
 adb shell am start --user 0 -a android.intent.action.VIEW \
-  -d 'file:///sdcard/Download/tvcheck.apk' -t 'application/vnd.android.package-archive'
+  -d 'file:///sdcard/Download/myembyhub.apk' -t 'application/vnd.android.package-archive'
 ```
 
-**装上带「在线更新」的版本之后就不用再手动推了**：电脑起 `python -m http.server 8000`，
-电视上「下载并安装新版本」填 `http://192.168.1.50:8000/tvcheck-debug.apk` 即可。
-
-### 远程配置（端口 5102）
-
-电视上点「启动配置服务(5102)」→ 电脑浏览器打开 `http://<电视IP>:5102`，
-表单改 `server` / `username` / `password` / `api_key` / `media` / `apk_url`，
-保存后写入 `/sdcard/tvcheck.conf`，App 下次测试时自动重读生效，不用重启也不用重打包。
-服务 10 分钟自动关闭；同网段设备都能访问（配置里可能有 API Key，只在可信网络用）。
+**装上带「在线更新」的版本之后就不用再手动推了**：电脑起 `python -m http.server 8765`，
+电视上「在线更新」填 `http://192.168.1.50:8765/myembyhub-debug.apk` 即可。
 
 ---
 
@@ -262,7 +242,7 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   `buildFeatures { buildConfig = true }`。
   忘了的话运行时 `Class.forName("…BuildConfig")` 抛 `ClassNotFoundException`，
   兜底返回 0 → 在线更新会**永远提示「有新版」**（明明已经是最新）。
-  `tvcheck` 模块有这行、`app` 模块一度漏了 —— 同一个坑的两面。
+  `app` 模块一度漏了这行 → 同一个坑的两面。
 - ⚠️ **改包名时，`proguard-rules.pro` 的 keep 规则必须同步改**（2026-11-09 实测）：
   `-keep class <旧包名>.BuildConfig { *; }` 写死了包名，
   改成新包名后这条 keep 就不再匹配 → 新的 `BuildConfig` **根本没被 keep**
@@ -270,7 +250,7 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   → 运行时 `NoSuchFieldException` → 「服务器信息」里客户端版本显示为空、
   在线更新又**永远提示「有新版」**。
   → 改包名要同步改的**四处**：
-  ① `*/build.gradle.kts` 的 `namespace` + `applicationId`；
+  ① `app/build.gradle.kts` 的 `namespace` + `applicationId`；
   ② 源码目录 + 所有 `package` 声明 / `import`；
   ③ **`app/proguard-rules.pro` 的 BuildConfig keep 规则**（最容易漏，
   脚本按扩展名批量替换时 `.pro` 常常被漏掉）；

@@ -127,15 +127,16 @@ Accept-Ranges: bytes
 若把 `Content-Length` 原样交给 ExoPlayer，媒体总长会算成 2048 → 时长、进度条全错。
 `DataSource` 要**解析 `Content-Range` 的总长并回填给 ExoPlayer**。
 
-### 3.5 已实现的原型（可直接抄进正式客户端）
+### 3.5 已实现的原型（现已搬进正式客户端）
 
 | 文件 | 作用 |
 |---|---|
-| `tvcheck/.../EmbyHttpDataSource.kt` | **完整的 ExoPlayer `DataSource` 实现**：TLS 握手、手写 HTTP、跟随 302、Range、`Content-Range` 总长回填 |
-| `tvcheck/.../UrlKit.kt` | 手工 URL 解析 + 重定向解析（避开 4.3 上 `java.net.URL` / `android.net.Uri` 的坑），有单元测试 |
-| `tvcheck/.../NetPlayProbe.kt` | 端到端探针：查 API → 拼 URL → ExoPlayer 实播网络视频 → 结果落盘 |
-| `tvcheck/.../HttpProbe.kt` | HTTP 变体矩阵探针：一次扫清服务器接受的写法 |
-| `tvcheck/src/test/.../UrlKitTest.kt` | URL 解析回归测试（7 个用例） |
+| `app/src/main/java/.../net/EmbyHttpDataSource.kt` | **完整的 ExoPlayer `DataSource` 实现**：TLS 握手、手写 HTTP、跟随 302、Range、`Content-Range` 总长回填 |
+| `app/src/main/java/.../net/UrlKit.kt` | 手工 URL 解析 + 重定向解析（避开 4.3 上 `java.net.URL` / `android.net.Uri` 的坑），有单元测试 |
+| `app/src/main/java/.../net/TlsStack.kt` | TLS factory（系统 JSSE）+ TLS1.2 协议抬高 |
+| `app/src/main/java/.../net/BundledCa.kt` | 内置 LE 锚点 + 手写链校验 |
+| `app/src/test/.../net/UrlKitTest.kt` | URL 解析回归测试（7 个用例） |
+| ~~`NetPlayProbe.kt` / `HttpProbe.kt`~~ | 端到端实播探针 / HTTP 变体矩阵探针 —— **随 `tvcheck` 探针模块一起删除** |
 
 **真机实播结果**（2026-11-03 19:33）：`READY` / 1920×1080 / `OMX.MS.AVC.Decoder`（MStar 硬解）/
 时长 1441131 ms / **丢帧 0** / 错误 无。
@@ -292,8 +293,11 @@ val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
 
 | 文件 | 说明 |
 |---|---|
-| `tvcheck/src/main/java/.../TlsStack.kt` | TLS factory（可直接抄进正式客户端） |
-| `tvcheck/src/main/java/.../BundledCa.kt` | 内置锚点 + 手写链校验 |
-| `tvcheck/src/main/java/.../TlsMatrix.kt` | TLS 诊断矩阵（回归测试用） |
-| `tvcheck/src/main/assets/*.pem` | LE 锚点证书 |
+| `app/src/main/java/.../net/TlsStack.kt` | TLS factory（系统 JSSE）+ TLS1.2 协议抬高 |
+| `app/src/main/java/.../net/BundledCa.kt` | 内置锚点 + 手写链校验 |
+| `app/src/main/assets/*.pem` | LE 锚点证书 |
+| `app/src/test/.../net/UrlKitTest.kt` | URL 解析回归测试（7 个用例） |
 | `docs/tv-device-report.md` | 真机实测底细 |
+
+> 原先的 `tvcheck/src/main/java/.../TlsMatrix.kt`（TLS 诊断矩阵）随探针模块一起删除，
+> 它的实测结论已经写进 `docs/tv-device-report.md` 第 5 节。
