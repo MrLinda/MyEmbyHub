@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主按钮文字色：焦点态是深色（压在暖色实心块上），平时是白色 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="#FF0B0E13" />
+    <item android:state_enabled="false" android:color="@color/text_disabled" />
+    <item android:color="@color/text_primary" />
+</selector>

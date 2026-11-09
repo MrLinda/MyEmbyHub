@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        深色主题：电视上看着不刺眼，也省电。
+
+        ⚠️ parent 用系统自带的 `android:Theme.Holo.NoActionBar`，**不要**换回
+        `Theme.MaterialComponents.NoActionBar`：
+        - Material Components 的整套主题会额外拉起一堆 View 层级和绘制逻辑
+          （Button 会被自动替换成 MaterialButton，带 ripple 层 + elevation 阴影），
+          在 S50 Air 的 1GHz MStar 上，焦点移动时每一帧都要多画这些东西。
+        - 本项目的 Activity 全部继承 `android.app.Activity`，代码里 0 处引用
+          material / appcompat 的类，布局里 0 个 `app:` 命名空间属性 ——
+          也就是说 Material 主题除了拖慢绘制，没有任何实际作用。
+        - Holo 是 API 11 起就有的系统主题，Android 4.3 原生支持，不存在兼容问题。
+
+        颜色仍然走自己的 @color/*，不依赖主题的 colorPrimary 那套语义。
+    -->
+    <style name="Theme.MyEmbyHub" parent="android:Theme.Holo.NoActionBar">
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <!-- 系统对话框（更新/二维码/服务器信息）在 4.3 上默认是 Holo 蓝，
+             换成暖色才和整个 App 一套语言 -->
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+
+    <!--
+        遥控器菜单的对话框：**透明窗口 + 自绘面板**。
+
+        系统 AlertDialog 自带一个带内边距的九宫格背景（青蓝边框 + 蓝色标题分隔线），
+        跟 App 的暖色语言冲突；所以窗口背景设成透明，内容全部由
+        `tv_menu_dialog.xml` 自己画（深色圆角面板 + 暖色竖条标题）。
+    -->
+    <style name="Theme.MyEmbyHub.Dialog" parent="android:Theme.Holo.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
+
+    <!-- 焦点高亮：遥控器移动时的视觉反馈 -->
+    <style name="FocusableCard">
+        <item name="android:focusable">true</item>
+        <item name="android:focusableInTouchMode">false</item>
+        <item name="android:background">@drawable/bg_card</item>
+        <item name="android:padding">10dp</item>
+        <item name="android:scaleX">1.0</item>
+        <item name="android:scaleY">1.0</item>
+    </style>
+
+    <style name="TvTitle">
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textSize">22sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <style name="TvSubtitle">
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+</resources>

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    菜单行：标题在左，副标题在右（两者挤在一行，比上下两行省高度 ——
+    电视上菜单一屏要能放下全部选项）。
+
+    竖条用 invisible 而不是 gone：焦点移动到别的行时标题不会左右跳。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="52dp"
+    android:layout_marginTop="2dp"
+    android:layout_marginBottom="2dp"
+    android:background="@drawable/bg_menu_item"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingLeft="14dp"
+    android:paddingRight="18dp">
+
+    <View
+        android:id="@+id/menu_indicator"
+        android:layout_width="3dp"
+        android:layout_height="18dp"
+        android:layout_marginRight="12dp"
+        android:background="@color/accent"
+        android:visibility="invisible" />
+
+    <TextView
+        android:id="@+id/tv_menu_item_title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/text_primary"
+        android:textSize="19sp" />
+
+    <TextView
+        android:id="@+id/tv_menu_item_sub"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="18dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/text_secondary"
+        android:textSize="15sp" />
+</LinearLayout>

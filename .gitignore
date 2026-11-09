@@ -1,0 +1,43 @@
+*.iml
+.gradle
+/local.properties
+# 整个 .idea 都不要：里面有本机 SDK / Gradle 路径、每个人的窗口布局
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# ---------- 编译产物 ----------
+# 各模块自己的 build 目录（原来的 /build 只挡了根目录那个）
+**/build/
+/.kotlin/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ---------- 交付产物目录 ----------
+# dist/ 里全是 APK、诊断日志和**带账号密码的 conf**（见下），一律不进仓库
+/dist/
+
+# ---------- 本地备份 ----------
+# _backup/ 是历史代码快照，纯本地留档
+/_backup/
+
+# ---------- 凭据与本机配置 ----------
+# ⚠️ 这些文件里有 Emby 账号 / 密码 / API Key，绝不能进仓库
+*.conf
+*.conf.*
+conf-backup.txt
+write_conf.py
+# 例外：保留干净的配置模板
+!/tvcheck/src/main/assets/tvcheck.conf.template
+
+# ---------- 其它本机痕迹 ----------
+*.log
+*.err
+captures/
+.externalNativeBuild/

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 次按钮文字色：焦点态变亮，平时是次要色 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="@color/text_primary" />
+    <item android:state_enabled="false" android:color="@color/text_disabled" />
+    <item android:color="@color/text_secondary" />
+</selector>

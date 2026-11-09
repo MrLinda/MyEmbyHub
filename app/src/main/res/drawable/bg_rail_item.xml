@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    左侧导航项（类别 tab）。
+
+    平时完全透明（只有文字），焦点时才浮出一块底色 + 暖色描边，
+    这样左栏读起来是「导航」而不是一堆大卡片。
+
+    state_selected = 「当前打开的就是这一项」：
+    焦点框只表示遥控器走到哪儿，不表示内容来自哪儿 ——
+    两个维度要分开，所以选中态用「浅底色」（不抢焦点框的戏）。
+    焦点优先于选中（focused 排前面），这样焦点框仍然清晰可见。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_lift" />
+            <stroke android:width="2dp" android:color="@color/accent" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_lift" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

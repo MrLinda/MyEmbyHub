@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    菜单行背景：焦点态是一块圆角浅色块（跟左栏 tab 的焦点框同一套语言）。
+
+    ⚠️ 焦点块用 `state_focused` 而不是 `state_activated`：
+    菜单行是真正拿到焦点的 View（RecyclerView + focusable item），
+    焦点框移动时立刻变色，不等列表的「选中」状态。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_pressed" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_pressed" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+</selector>

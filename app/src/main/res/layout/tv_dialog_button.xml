@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    对话框按钮。
+
+    用 TextView 而不是 Button：系统的 Button 在 4.3 上自带一套背景和内边距，
+    要覆盖得写一堆 style；TextView + 自绘背景更可控。
+
+    文字颜色用 color 里的 selector：焦点态切换成深色（压在暖色实心块上）。
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="42dp"
+    android:layout_marginLeft="12dp"
+    android:background="@drawable/bg_dialog_btn"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:gravity="center"
+    android:minWidth="112dp"
+    android:paddingLeft="22dp"
+    android:paddingRight="22dp"
+    android:textColor="@color/dialog_btn_text"
+    android:textSize="17sp" />

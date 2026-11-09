@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    输入框：去掉系统那条青蓝色下划线，换成一条暖色细线。
+
+    系统 EditText 的下划线颜色跟着主题走（Material 上是 colorPrimary，青蓝色），
+    在这套暖色界面里非常跳眼。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+    <item
+        android:bottom="1dp"
+        android:gravity="bottom">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/accent_soft" />
+        </shape>
+    </item>
+</layer-list>

@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#101216"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:focusable="false">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="6dp"
+                android:text="① 服务器连通性 / TLS 协商"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etServer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="服务器地址，如 http://192.168.1.10:8096"
+                android:imeOptions="actionGo"
+                android:inputType="textUri"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#8892A0"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp">
+
+                <Button
+                    android:id="@+id/btnNet"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="测试连通性"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnLogin"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:text="登录取Token"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnClear"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:text="清空"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnDiag"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:text="TLS诊断"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/etUser"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="Emby 用户名"
+                    android:inputType="text"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#8892A0"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/etPass"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:layout_weight="1"
+                    android:hint="Emby 密码"
+                    android:inputType="textPassword"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#8892A0"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvNet"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#0A0C10"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="等待测试…"
+                android:textColor="#7CFF9B"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="6dp"
+                android:paddingTop="14dp"
+                android:text="③ 远程配置（电脑浏览器直接改）"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingBottom="4dp"
+                android:paddingTop="4dp">
+
+                <Button
+                    android:id="@+id/btnCfg"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="启动配置服务(5102)"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnCfgStop"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:text="停止"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvCfg"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#0A0C10"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="未启动。在电脑浏览器打开 http://&lt;电视IP&gt;:5102 即可改配置。"
+                android:textColor="#8AB4F8"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="6dp"
+                android:paddingTop="14dp"
+                android:text="④ 在线更新（电脑开个 HTTP 服务，电视一键下载安装）"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etApkUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="APK 地址，如 http://192.168.1.50:8000/tvcheck-debug.apk"
+                android:imeOptions="actionGo"
+                android:inputType="textUri"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#8892A0"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:text="下载并安装新版本"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tvUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#0A0C10"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="未开始。电脑端可运行 tools\\serve-dist.ps1 开放 dist 目录。"
+                android:textColor="#FFB86B"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="6dp"
+                android:paddingTop="14dp"
+                android:text="② 播放能力（ExoPlayer 2.19）"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etMedia"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="媒体地址（Emby 播放地址 / m3u8），可留空"
+                android:imeOptions="actionGo"
+                android:inputType="textUri"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#8892A0"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingBottom="4dp"
+                android:paddingTop="4dp">
+
+                <Button
+                    android:id="@+id/btnPlayUrl"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="播上面地址"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnPlayH264"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:text="H264样片"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnPlayH265"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="6dp"
+                    android:text="HEVC样片"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <com.google.android.exoplayer2.ui.PlayerView
+                android:id="@+id/playerView"
+                android:layout_width="match_parent"
+                android:layout_height="240dp"
+                android:background="#000000"
+                app:resize_mode="fit"
+                app:show_buffering="when_playing"
+                app:use_controller="true" />
+
+            <TextView
+                android:id="@+id/tvPlay"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="#0A0C10"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="等待播放测试…"
+                android:textColor="#7CFF9B"
+                android:textSize="11sp" />
+
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

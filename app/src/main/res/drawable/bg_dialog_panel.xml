@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    对话框面板：深色圆角卡片。
+
+    ⚠️ 系统 AlertDialog 自带的背景是带内边距的九宫格，
+    换成自己的 shape 就得自己管圆角和描边，不然内容会顶到圆角外面。
+    所以 TvMenu 走的是「透明窗口 + 自绘面板」的路子：
+    窗口背景透明，只剩这块面板可见。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/surface_lift" />
+    <corners android:radius="16dp" />
+    <stroke
+        android:width="1dp"
+        android:color="@color/divider" />
+</shape>

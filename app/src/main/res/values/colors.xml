@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 底色：近黑但带一点冷调，纯黑在电视上会显得发灰 -->
+    <color name="bg">#FF0B0E13</color>
+    <color name="surface">#FF151A22</color>
+    <color name="surface_lift">#FF1F2632</color>
+    <color name="surface_pressed">#FF232936</color>
+
+    <!-- 品牌色：只留给真正的「动作」（登录、播放按钮） -->
+    <color name="brand">#FF3D7EFF</color>
+    <color name="brand_dark">#FF2456B8</color>
+
+    <!-- 状态色：焦点描边 / 进度条，暖色在深底上更跳 -->
+    <color name="accent">#FFFFB454</color>
+    <color name="accent_soft">#99FFB454</color>
+    <color name="progress_track">#33FFFFFF</color>
+
+    <color name="text_primary">#FFF2F5FA</color>
+    <color name="text_secondary">#FF98A2B3</color>
+    <color name="text_disabled">#FF5A6270</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="divider">#FF262C38</color>
+    <color name="error">#FFFF6B6B</color>
+</resources>

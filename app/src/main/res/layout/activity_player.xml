@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <com.google.android.exoplayer2.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:keepScreenOn="true" />
+
+    <TextView
+        android:id="@+id/tv_info"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:padding="16dp"
+        android:textColor="@color/text_primary"
+        android:textSize="18sp"
+        android:background="#88000000" />
+
+    <TextView
+        android:id="@+id/tv_error"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:padding="24dp"
+        android:textColor="@color/error"
+        android:textSize="18sp"
+        android:visibility="gone" />
+
+    <!-- 起播网速：黑屏干等的时候，用它在画面正中说明「还在下、没卡死」。
+         出第一帧或播放失败时自动隐藏，不会挡住正片。 -->
+    <LinearLayout
+        android:id="@+id/box_speed"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:paddingLeft="32dp"
+        android:paddingRight="32dp"
+        android:paddingTop="20dp"
+        android:paddingBottom="20dp"
+        android:background="#B3000000"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tv_speed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="240dp"
+            android:gravity="center"
+            android:textColor="@color/text_primary"
+            android:textSize="34sp"
+            android:fontFamily="monospace"
+            android:text="0.0 MB/s" />
+
+        <TextView
+            android:id="@+id/tv_speed_hint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="@color/text_secondary"
+            android:textSize="15sp"
+            android:text="正在缓冲…" />
+
+    </LinearLayout>
+
+    <!-- 解码诊断面板：黑屏时靠它一眼看出卡在哪一步（取流/解封装/解码器/首帧）。
+         默认隐藏，连按 MENU 或播放异常时出现。 -->
+    <TextView
+        android:id="@+id/tv_diag"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:padding="12dp"
+        android:textColor="#FF9BE89B"
+        android:textSize="12sp"
+        android:fontFamily="monospace"
+        android:background="#CC000000"
+        android:visibility="gone" />
+
+</FrameLayout>
