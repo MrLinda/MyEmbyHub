@@ -26,6 +26,8 @@ local.properties
 # ---------- 本地备份 ----------
 # _backup/ 是历史代码快照，纯本地留档
 /_backup/
+# AGENTS.local.md 是 AGENTS.md 的本机私有副本（保留真实域名/IP），不进仓库
+/AGENTS.local.md
 
 # ---------- 凭据与本机配置 ----------
 # ⚠️ 这些文件里有 Emby 账号 / 密码 / API Key，绝不能进仓库
