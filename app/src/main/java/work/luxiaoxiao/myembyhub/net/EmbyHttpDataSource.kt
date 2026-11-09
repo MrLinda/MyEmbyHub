@@ -433,6 +433,11 @@ class EmbyHttpDataSource(
                 ?: throw IOException("无法构造 TLS socket factory")
             // ⚠️ 只包 factory；这里拿到的是**真 socket**，直接设协议即可
             val ssl = factory.createSocket() as SSLSocket
+            // ⚠️⚠️ 必须显式设 SNI！
+            //    无参 createSocket() 建出来的 socket 不带 SNI，
+            //    挂在 Cloudflare 前面的服务器会**直接拒握手**。
+            //    （业务接口走 HttpsURLConnection，libcore 内部会设，所以只有取流挂）
+            TlsStack.applyServerName(ssl, host)
             ssl.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             ssl.startHandshake()
             return ssl

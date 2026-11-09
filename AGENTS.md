@@ -54,6 +54,7 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
    → **已排除**。2026-11-03 真机实测：4.3 的系统 JSSE 用 TLSv1.2 + 内置锚点
    **握手成功**（`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`）。
    **不需要 Conscrypt，也不需要 Bouncy Castle。**
+4. **必须带 SNI**（2026-11-09 新增，见第 6 节「SNI 缺失」）。
 
 > ⚠️ **测服务器时务必先确认本机 DNS 有没有被 Clash 劫持**：
 > 本机跑着 Clash Verge（fake-IP 模式），`tv.example.com` 会解析成 `198.18.0.206`，
@@ -62,7 +63,9 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 > 详见 `docs/tv-device-report.md` 第 5.3 节。
 >
 > 另：服务器**最低要 TLS 1.1**（TLS 1.0 会被回 `tlsv1 alert protocol version`），
-> 且**不要求 SNI、不挑 cipher** —— 这两条放宽了设计约束。
+> 且**不挑 cipher** —— 这两条放宽了设计约束。
+> ⚠️ 但**「不要求 SNI」只对当时那台 openresty 后端成立**：
+> 换成挂在 CDN（Cloudflare）前面的源站后，**没有 SNI 会被直接拒握手**。
 
 自签名证书同理，客户端必须显式信任。
 
@@ -216,6 +219,26 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
 - ✅ **网络实播已验证通过**（2026-11-03 19:33）：自写 DataSource 取流 →
   ExoPlayer 2.19.1 → `OMX.MS.AVC.Decoder`（MStar 硬解）→ 1080p 上屏，**零丢帧**。
   详见 `docs/tv-device-report.md` 5.7 节。
+- ⚠️⚠️ **SNI 缺失 —— 换了 CDN 源站就只剩「接口能通、取流全挂」**（2026-11-09 实测）：
+  - `SSLSocketFactory.createSocket()` 建出来的 socket **ClientHello 里没有 SNI**。
+    普通后端不 care，但**挂在 Cloudflare 前面**的源站**没有 SNI 就直接拒握手**。
+  - **症状极有迷惑性**：`HttpsURLConnection`（业务接口那条路）**自带 SNI**
+    （libcore 内部调 `OpenSSLSocketImpl.setHostname()`）→ **接口全部正常**，
+    只有自写 DataSource 取流挂；错误是
+    `SSL handshake aborted` + `SSL3_GET_RECORD:wrong version number`，
+    看起来像「证书不对 / 服务器只支持 TLS 1.3 / 代理拦截」，其实只是**少了个 SNI**。
+  - **修法**：`TlsStack.applyServerName(socket, host)` ——
+    - API 24+：`SSLParameters.setServerNames(SNIHostName)`（公开 API）；
+    - **API 18**：`javax.net.ssl.SNIHostName` 这个类**根本不存在**，
+      但 `org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl` 上有个
+      **隐藏方法 `setHostname(String)`** —— 4.3 上设 SNI 的唯一入口，只能反射调。
+    - ⚠️ 写反射时**不能把 `SNIHostName` / `SSLParameter` 写进类型声明** ——
+      那两个类 API 24 才有，4.3 上类都加载不到，字节码校验阶段就炸；
+      全程用 `Any` + `Class.forName`。
+  - **注意**：`createSocket(host, port)` 在 4.3 上**也带不了 SNI**（实测同样被拒），
+    只能靠上面的 `setHostname`。
+  - 验证方式：在 4.3 上跑一段小程序，对比「带 / 不带 SNI」两种握手，
+    带 SNI 成功、不带被拒 —— 一眼就能定位。
 - ⚠️ **手写 HTTP 的四个坑（全部真机踩过，`cmd=httpprobe` 可复现）**：
   - **绝不能用 `java.net.URL(URL, String)` 解析重定向**：Android 4.3 的 libcore 会把
     base 的 query 重复拼到绝对 URL 后面（`.../stream?a=b?a=b`）→ 404。

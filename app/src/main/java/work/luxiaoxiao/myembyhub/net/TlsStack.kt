@@ -4,6 +4,7 @@ import android.content.Context
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
@@ -162,6 +163,69 @@ object TlsStack {
         override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {}
         override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {}
         override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    /**
+     * 给 socket 设置 **SNI（Server Name Indication）**。
+     *
+     * ## 为什么必须显式设置
+     *
+     * `SSLSocketFactory.createSocket()` 建出来的 socket **默认不带 SNI**，
+     * ClientHello 里没有 server_name 扩展。对普通后端无所谓，但：
+     *
+     * - 挂在 **Cloudflare** 前面的服务器，没有 SNI 就**直接拒绝握手**
+     *   （实测 2026-11-09：`sslv3 alert handshake failure`，
+     *   在 4.3 的 OpenSSL 1.0.1 上表现为 `SSL handshake aborted` +
+     *   `SSL3_GET_RECORD:wrong version number`，非常难认）；
+     * - 一些 CDN / 多租户网关也要靠 SNI 选站点。
+     *
+     * `HttpsURLConnection`（业务接口走的那条路）**自带 SNI** —— libcore 内部
+     * 调了 `OpenSSLSocketImpl.setHostname()`。所以现象是「接口调用正常、
+     * 只有取流失败」，很容易误判成网络或证书问题。
+     *
+     * ## 两个系统怎么设
+     *
+     * - **API 24+**：`SSLParameters.setServerNames(SNIHostName)`（公开 API）。
+     * - **API 18（这台电视）**：`javax.net.ssl.SNIHostName` 这个类根本不存在，
+     *   但 `org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl` 上有个
+     *   **隐藏方法 `setHostname(String)`** —— 它就是 4.3 上设 SNI 的入口
+     *   （`HttpsURLConnection` 走的也是它）。只能反射调用。
+     *
+     * 两个都失败也不致命：这时退回到「不带 SNI」，普通后端照样能连。
+     */
+    fun applyServerName(socket: SSLSocket, host: String) {
+        if (host.isEmpty()) return
+
+        // ① API 24+：SSLParameters.setServerNames
+        try {
+            // ⚠️ 这里不能用 SSLParameter/SNIHostName 做类型声明：
+            //    那些类 API 24 才有，API 18 上连类都加载不到，
+            //    写进字节码会在校验阶段炸。全程只用 Any + 反射。
+            val sniHostName: Any = Class.forName("javax.net.ssl.SNIHostName")
+                .getConstructor(String::class.java)
+                .newInstance(host)
+            val params = socket.sslParameters
+            Class.forName("javax.net.ssl.SSLParameters")
+                .getMethod("setServerNames", List::class.java)
+                .invoke(params, listOf(sniHostName))
+            socket.sslParameters = params
+            return
+        } catch (ignored: Throwable) {
+        }
+
+        // ② API 18：OpenSSLSocketImpl.setHostname(String)（隐藏方法）
+        try {
+            socket.javaClass.getMethod("setHostname", String::class.java)
+                .invoke(socket, host)
+            return
+        } catch (ignored: Throwable) {
+        }
+        try {
+            socket.javaClass.getDeclaredMethod("setHostname", String::class.java)
+                .apply { isAccessible = true }
+                .invoke(socket, host)
+        } catch (ignored: Throwable) {
+        }
     }
 }
 

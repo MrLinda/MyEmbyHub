@@ -38,6 +38,19 @@ Let's Encrypt 2024 新根——所有东西都得自己手搓。
 
 > 实测：4.3 用系统 JSSE + 内置锚点，TLS 1.2 握手成功，**不需要 Conscrypt，也不需要 Bouncy Castle**。
 
+### SNI：接口正常、取流全挂的经典坑
+
+`SSLSocketFactory.createSocket()` 建出来的 socket **ClientHello 里没有 SNI**。
+普通后端不 care，但源站一旦挂在 **Cloudflare** 前面，**没有 SNI 就直接拒握手**。
+
+最迷惑的是：`HttpsURLConnection`（业务接口那条路）**自带 SNI**，
+所以**接口调用全部正常，只有自写 `DataSource` 取流挂**，
+错误还长得像「证书不对 / 服务器只支持 TLS 1.3 / 代理拦截」。
+
+修法在 `TlsStack.applyServerName()`：API 24+ 用 `SSLParameters.setServerNames`；
+**API 18** 只能反射调 `OpenSSLSocketImpl.setHostname(String)` 这个隐藏方法
+（`SNIHostName` 那个类在 4.3 上根本不存在）。
+
 ### 取流：服务器 302 到另一个域名，而且节点会变
 
 Emby 前面挂反代，取流会 302 到纯文件后端（另一个域名，多节点，**域名会变**）。
