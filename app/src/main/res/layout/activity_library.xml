@@ -3,7 +3,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@color/bg">
+    android:background="@color/surface_base">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -12,7 +12,7 @@
         android:gravity="center_vertical"
         android:paddingLeft="24dp"
         android:paddingRight="24dp"
-        android:background="@color/surface">
+        android:background="@color/surface_raised">
 
         <TextView
             android:id="@+id/tv_title"
@@ -48,7 +48,7 @@
             android:paddingLeft="18dp"
             android:paddingRight="18dp"
             android:text="搜索"
-            android:textColor="@color/text_primary"
+            android:textColor="@color/content_primary"
             android:textSize="15sp"
             android:focusable="true"
             android:nextFocusRight="@+id/btn_menu"
@@ -63,7 +63,7 @@
             android:paddingLeft="18dp"
             android:paddingRight="18dp"
             android:text="菜单"
-            android:textColor="@color/text_primary"
+            android:textColor="@color/content_primary"
             android:textSize="15sp"
             android:focusable="true"
             android:nextFocusLeft="@+id/btn_search" />

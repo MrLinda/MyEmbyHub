@@ -12,6 +12,7 @@ import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -74,6 +75,9 @@ class LibraryActivity : Activity() {
     /** 搜索模式下隐藏左侧。 */
     private var searchMode = false
 
+    /** 首页传来的深链 / 搜索意图只处理一次（Activity 重建时 intent 里的 extra 还在）。 */
+    private var deepLinkConsumed = false
+
     private var phoneServer: PhoneControlServer? = null
     private var qrDialog: Dialog? = null
 
@@ -104,6 +108,9 @@ class LibraryActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_library)
+        // 首页是全屏的，这里不收系统栏的话，从首页切过来会「跳」一下：
+        // 顶部状态栏和底部导航条突然冒出来，内容整体下移 25dp。
+        hideSystemBars()
 
         rvLeft = findViewById(R.id.rv_left)
         rvRight = findViewById(R.id.rv_right)
@@ -220,8 +227,10 @@ class LibraryActivity : Activity() {
                     leftItems.add(resumeEntry)
                     leftItems.addAll(libs)
                     leftAdapter.submit(leftItems)
-                    // 启动就直接进「最近观看」，别停在空面板的「加载中…」上
-                    if (libs.isEmpty()) {
+                    // 首页深链 / 搜索优先：直接从首页点进来的条目不该先闪一下「最近观看」
+                    if (applyDeepLink()) {
+                        // 已经在 applyDeepLink 里处理完了
+                    } else if (libs.isEmpty()) {
                         tvTitle.text = getString(R.string.empty)
                     } else {
                         openResume()
@@ -231,6 +240,30 @@ class LibraryActivity : Activity() {
                 }
             }
         }
+    }
+
+    /**
+     * 处理首页传来的深链 / 搜索意图。
+     *
+     * @return true 表示已经接管了首屏（调用方不要再自动打开「最近观看」）
+     */
+    private fun applyDeepLink(): Boolean {
+        if (deepLinkConsumed) return false
+        deepLinkConsumed = true
+
+        val parentId = intent.getStringExtra(EXTRA_PARENT_ID).orEmpty()
+        if (parentId.isNotEmpty()) {
+            val name = intent.getStringExtra(EXTRA_PARENT_NAME).orEmpty()
+            path.clear()
+            path.add(Layer(name, parentId, ""))
+            loadLevel(parentId, name)
+            return true
+        }
+        if (intent.getBooleanExtra(EXTRA_OPEN_SEARCH, false)) {
+            showSearchDialog()
+            return true
+        }
+        return false
     }
 
     /** 加载某一级的内容。 */
@@ -245,7 +278,27 @@ class LibraryActivity : Activity() {
         tvHint.text = ""
         setLoading(true)
         worker.execute {
-            val result = api.items(parentId, recursive = false, sortBy = sortKey, descending = desc)
+            // 媒体库这一层直接给海报墙：库里每个影片外面套了同名文件夹，
+            // 非递归列出来只有「电影」「1080p电影」几个文件夹，得让用户再点一层才看到片，
+            // 电视上这一步纯属白按。再往下的层（季/集/子目录）仍然非递归。
+            val atLibraryRoot = path.size == 1
+            val result = if (atLibraryRoot) {
+                val flat = api.items(
+                    parentId,
+                    recursive = true,
+                    sortBy = sortKey,
+                    descending = desc,
+                    includeItemTypes = LIBRARY_ITEM_TYPES
+                )
+                // 播放列表 / 未分类这类虚拟库递归可能一个都没有 → 退回分层列
+                if (flat.getOrNull().isNullOrEmpty()) {
+                    api.items(parentId, recursive = false, sortBy = sortKey, descending = desc)
+                } else {
+                    flat
+                }
+            } else {
+                api.items(parentId, recursive = false, sortBy = sortKey, descending = desc)
+            }
             main.post {
                 setLoading(false)
                 result.onSuccess { items ->
@@ -344,6 +397,8 @@ class LibraryActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         // 播完回来刷新一次：进度、「已看」标记、「继续观看」列表都会变
         if (requestCode == REQ_PLAY) reloadCurrent()
+        // 详情页里也可能直接播了一集，回来同样要刷
+        if (requestCode == REQ_DETAIL) reloadCurrent()
     }
 
     /** 进入下一层（剧 → 季 → 集）。 */
@@ -467,88 +522,10 @@ class LibraryActivity : Activity() {
      *   看过一半就是那一集（Emby 自己会算，不用客户端记状态）
      */
     private fun showDetail(item: MediaItem) {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_detail, null)
-        val tvMeta = view.findViewById<TextView>(R.id.dt_meta)
-        val tvOverview = view.findViewById<TextView>(R.id.dt_overview)
-        val btnPlay = view.findViewById<Button>(R.id.dt_play)
-        val btnEpisodes = view.findViewById<Button>(R.id.dt_episodes)
-
-        tvMeta.text = metaText(item)
-        // ⚠️ 列表接口为了省流量**不再返回 Overview**（见 EmbyApi.LIST_FIELDS），
-        //    所以简介要单独拉一次「单条详情」。列表页一页 200 条时，
-        //    把 200 条简介塞进同一个响应能让 JSON 体积翻好几倍，
-        //    在 1GHz 的 MStar 上光是解析就要几百毫秒 —— 而简介只有这里用得到。
-        tvOverview.text = if (item.overview.isNotEmpty()) item.overview else "正在读取简介…"
-        btnEpisodes.visibility = if (item.type == "Series") View.VISIBLE else View.GONE
-
-        if (item.overview.isEmpty()) {
-            worker.execute {
-                val detail = api.itemDetail(item.id).getOrNull()
-                val text = detail?.overview?.takeIf { it.isNotEmpty() }
-                main.post {
-                    tvOverview.text = text ?: "（没有简介）"
-                }
-            }
-        }
-
-        var target: MediaItem? = null
-        var startMs = 0L
-
-        if (item.type != "Series") {
-            target = item
-            startMs = item.resumeMs
-            btnPlay.text = if (startMs > 0) "继续播放 ${MediaItem.formatDuration(startMs)}" else "播放"
-        } else {
-            btnPlay.text = "正在读取进度…"
-            btnPlay.isEnabled = false
-            worker.execute {
-                val next = api.nextUp(item.id).getOrNull() ?: api.firstEpisode(item.id).getOrNull()
-                main.post {
-                    if (next == null) {
-                        btnPlay.text = "没有可播放的剧集"
-                    } else {
-                        target = next
-                        startMs = next.resumeMs
-                        val ep = if (next.indexNumber > 0) "第 ${next.indexNumber} 集" else next.name
-                        btnPlay.text = if (startMs > 0) "继续播放 $ep" else "从${ep}开始"
-                        btnPlay.isEnabled = true
-                    }
-                }
-            }
-        }
-
-        // 详情页：标题用面板标题栏，简介和按钮都放进内容区
-        val dialog = TvDialog.show(
-            this,
-            item.name,
-            view,
-            buttons = emptyList(),
-            initialFocus = if (btnPlay.isEnabled) btnPlay else btnEpisodes,
-            onDismiss = { focusFirst(rvRight) }
-        )
-
-        btnPlay.setOnClickListener {
-            val t = target ?: return@setOnClickListener
-            dialog.dismiss()
-            play(t, startMs)
-        }
-        btnEpisodes.setOnClickListener {
-            dialog.dismiss()
-            drillInto(item)
-        }
-    }
-
-    private fun metaText(item: MediaItem): String {
-        val parts = ArrayList<String>()
-        parts.add(if (item.type == "Series") "剧集" else "电影")
-        if (item.runtimeTicks > 0) parts.add(MediaItem.formatDuration(item.runtimeTicks / 10_000))
-        if (item.played) {
-            parts.add("已看完")
-        } else {
-            val progress = item.progressText()
-            if (progress.isNotEmpty()) parts.add(progress)
-        }
-        return parts.joinToString(" · ")
+        // 详情页现在是独立的一整页（DetailActivity），不再是弹窗：
+        // 弹窗里塞不下简介 + 选集，电视上按起来像走迷宫。
+        // 这个函数保留原来的名字，是因为下面几处（左右栏点击）都还叫它。
+        startActivityForResult(DetailActivity.intent(this, item), REQ_DETAIL)
     }
 
     private fun showServerInfo() {
@@ -563,6 +540,9 @@ class LibraryActivity : Activity() {
                 msg.append("Token：").append(if (token.isEmpty()) "无" else token.take(6) + "…（长度 ${token.length}）")
                     .append('\n')
                 msg.append("客户端版本：").append(UpdateManager(this).currentVersionName())
+                    .append('\n')
+                // 更新来源也放进来：镜像站时通时不通，出问题时能一眼看出它要去哪
+                msg.append("更新来源：").append(Session.get(this).updateManifest)
                 TvDialog.message(this, "服务器信息", msg.toString())
             }
         }
@@ -584,94 +564,8 @@ class LibraryActivity : Activity() {
     // ==================== 在线更新 ====================
 
     private fun checkUpdate() {
-        toast("正在检查更新…")
-        worker.execute {
-            val um = UpdateManager(this)
-            val manifest = Session.get(this).updateManifestUrl
-            val result = um.check(manifest)
-            main.post {
-                result.onSuccess { release ->
-                    if (release == null) {
-                        TvDialog.message(
-                            this,
-                            "没有新版本",
-                            "当前已是最新版本：${um.currentVersionName()}"
-                        )
-                    } else {
-                        showUpdateDialog(um, release)
-                    }
-                }.onFailure { e ->
-                    // 原始异常是英文技术报错（failed to connect to /192.168.1.50 ...），
-                    // 电视上没法自救 → 用 friendlyError 翻成中文，更新地址照样留着
-                    TvDialog.message(
-                        this,
-                        "检查更新失败",
-                        "${work.luxiaoxiao.myembyhub.net.friendlyError(e)}\n\n更新地址：$manifest"
-                    )
-                }
-            }
-        }
-    }
-
-    private fun showUpdateDialog(um: UpdateManager, release: UpdateManager.Release) {
-        val msg = StringBuilder()
-        msg.append("发现新版本：").append(release.versionName).append('\n')
-        if (release.notes.isNotEmpty()) msg.append(release.notes).append('\n')
-        msg.append("大小：").append(MediaItem.formatSize(release.size)).append('\n')
-        msg.append("下载后需要你在电视上按一次「安装」。")
-        TvDialog.confirm(
-            this,
-            "在线更新",
-            msg.toString(),
-            confirmText = "下载",
-            cancelText = "稍后"
-        ) {
-            downloadUpdate(um, release)
-        }
-    }
-
-    private fun downloadUpdate(um: UpdateManager, release: UpdateManager.Release) {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_progress, null)
-        val tv = view.findViewById<TextView>(R.id.tv_progress_text)
-        val bar = view.findViewById<ProgressBar>(R.id.pb_progress)
-        // 不可取消：下载中按返回会把进度条关掉，但下载还在后台跑
-        val dlg = TvDialog.show(
-            this,
-            "正在下载更新",
-            view,
-            buttons = emptyList(),
-            cancelable = false
-        )
-
-        um.download(release,
-            onProgress = { done, total ->
-                main.post {
-                    tv.text = if (total > 0) {
-                        "已下载 ${MediaItem.formatSize(done)} / ${MediaItem.formatSize(total)}"
-                    } else {
-                        "已下载 ${MediaItem.formatSize(done)}"
-                    }
-                    if (total > 0) {
-                        bar.max = 100
-                        bar.progress = ((done * 100) / total).toInt()
-                    }
-                }
-            },
-            onDone = { path ->
-                main.post {
-                    dlg.dismiss()
-                    toast("下载完成，正在调起安装器…")
-                    if (!um.install(path)) {
-                        toast("调起安装器失败")
-                    }
-                }
-            },
-            onError = { msg ->
-                main.post {
-                    dlg.dismiss()
-                    TvDialog.message(this, "下载失败", msg)
-                }
-            })
+        // 检查 → 确认 → 下载三段都收进 UpdateUi 了：首页那边也要用同一套
+        UpdateUi.check(this, worker, main, ::toast)
     }
 
     // ==================== 搜索 ====================
@@ -804,6 +698,31 @@ class LibraryActivity : Activity() {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 弹过对话框、从播放器回来之后，系统栏会偷偷回来，这里再收一次
+        if (hasFocus) hideSystemBars()
+    }
+
+    /**
+     * 全屏（隐藏状态栏 + 底部导航条）。
+     *
+     * 不能用 IMMERSIVE_STICKY —— 那是 API 19 才有的常量，这台电视是 4.3。
+     * 只能用这套老标志位，并且要在 onWindowFocusChanged 里反复收，
+     * 因为系统在任何一次「窗口焦点变化」后都会把栏还回来。
+     */
+    private fun hideSystemBars() {
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LOW_PROFILE
+    }
+
     override fun onDestroy() {
         phoneServer?.stop()
         worker.shutdownNow()
@@ -864,8 +783,8 @@ class LibraryActivity : Activity() {
             holder.itemView.isSelected = sel
             holder.indicator?.visibility = if (sel) View.VISIBLE else View.GONE
             holder.title.setTextColor(
-                if (sel) ContextCompat.getColor(this@LibraryActivity, R.color.accent)
-                else ContextCompat.getColor(this@LibraryActivity, R.color.text_primary)
+                if (sel) ContextCompat.getColor(this@LibraryActivity, R.color.content_accent)
+                else ContextCompat.getColor(this@LibraryActivity, R.color.content_primary)
             )
         }
 
@@ -1013,7 +932,7 @@ class LibraryActivity : Activity() {
                 holder.itemView.isSelected = false
                 holder.indicator?.visibility = View.GONE
                 holder.title.setTextColor(
-                    ContextCompat.getColor(this@LibraryActivity, R.color.text_primary))
+                    ContextCompat.getColor(this@LibraryActivity, R.color.content_primary))
             }
         }
 
@@ -1068,6 +987,19 @@ class LibraryActivity : Activity() {
         private const val RESUME_ID = "__resume__"
 
         private const val REQ_PLAY = 1001
+        private const val REQ_DETAIL = 1002
+
+        /**
+         * 从首页深链进来的目标（媒体库 id / 剧 id / 文件夹 id）。
+         *
+         * 首页卡片点「剧」这类需要再下钻的条目时，直接跳到这里并定位到对应层，
+         * 不用让用户在老界面里再点一遍。
+         */
+        const val EXTRA_PARENT_ID = "home_parent_id"
+        const val EXTRA_PARENT_NAME = "home_parent_name"
+
+        /** 首页顶栏「搜索」进来时直接弹搜索框。 */
+        const val EXTRA_OPEN_SEARCH = "home_open_search"
 
         /**
          * 海报请求宽度（像素）。
@@ -1077,5 +1009,8 @@ class LibraryActivity : Activity() {
          * 位图内存按宽度平方涨，320 宽是 160 宽的 4 倍。
          */
         private const val POSTER_WIDTH = 160
+
+        /** 媒体库根层递归列条目时只收这几种（Folder 包装项会被服务端先滤掉）。 */
+        private const val LIBRARY_ITEM_TYPES = "Movie,Series,Video"
     }
 }

@@ -24,14 +24,14 @@
         <View
             android:layout_width="4dp"
             android:layout_height="20dp"
-            android:background="@color/accent" />
+            android:background="@color/indicator_bar" />
 
         <TextView
             android:id="@+id/tv_dialog_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginLeft="12dp"
-            android:textColor="@color/text_primary"
+            android:textColor="@color/content_primary"
             android:textSize="21sp"
             android:textStyle="bold" />
     </LinearLayout>
@@ -39,7 +39,7 @@
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
-        android:background="@color/divider" />
+        android:background="@color/stroke_subtle" />
 
     <!-- 内容区：消息文本 / 进度条 / 二维码 / 输入框都塞这里 -->
     <FrameLayout

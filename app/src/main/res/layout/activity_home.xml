@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    正式首页：顶部导航 + 纵向多条横滑行。
+
+    层序是刻意的：**内容 → 渐隐 → 顶栏**。
+    顶栏最后声明、最后绘制，所以永远在最上层；
+    渐隐夹在中间，只压内容，不压顶栏。
+
+    ⚠️ 内容区 `paddingTop=@dimen/home_nav_bar_height` + `clipToPadding=false`：
+       留出顶栏的高度，但滚动时内容可以进到这块区域里（然后被渐隐吃掉），
+       否则第一排卡片上永远有一条空白。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/surface_base">
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!--
+            ⚠️ 必须用 `TopInsetScrollView`，不能用系统 `ScrollView`：
+               系统那个算「要不要为焦点滚动」时把可视上边界当成 y=0（不看 padding），
+               于是焦点回到第一排时只滚到「第一排顶边压在 y=0」就停手 ——
+               上半张卡永远藏在顶栏底下，整页也回不到刚进来的样子（实测截图）。
+               这个子类把上边界下移 paddingTop，跟顶栏高度天然同步。
+        -->
+        <work.luxiaoxiao.myembyhub.ui.TopInsetScrollView
+            android:id="@+id/scroll_sections"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:paddingTop="@dimen/home_nav_bar_height"
+            android:clipToPadding="false"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/section_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingBottom="40dp" />
+        </work.luxiaoxiao.myembyhub.ui.TopInsetScrollView>
+
+        <!--
+            媒体库页（顶栏 tab 切过来时才有内容，第一次进才建）。
+
+            跟首页刻意长得不一样：左边一列竖排分类，右边整片海报墙。
+            首页是「一眼扫过去有什么」（横滑行叠行），媒体库是「在分类里反复挑」
+            （竖列能余光看到上下五个分类）—— 两种任务，两套排布。
+        -->
+        <LinearLayout
+            android:id="@+id/page_library"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:paddingTop="@dimen/home_nav_bar_height"
+            android:visibility="gone">
+
+            <!--
+                左栏：上面固定一行「排序 · xxx」，下面是可滚的分类列。
+
+                排序行**不能**放进可滚动的 `lib_tab_column`：
+                ① 代码里 `buildLibTabs()` 开头就 `removeAllViews()`，会把排在里面的它一起删掉；
+                ② 它是「动作」，滚下去就看不见了，而用户是在滚到第 12 个分类时最想换排序。
+            -->
+            <LinearLayout
+                android:layout_width="228dp"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:paddingLeft="14dp">
+
+                <!--
+                    排序行放在分类列表**最上面**，而不是顶栏。
+
+                    为什么不是顶栏：顶栏从左往右走会「焦点即切换」——
+                    要够到最右边的按钮，必须先经过「搜索」tab，一经过就切页了，
+                    排序按钮在媒体库页其实**永远走不到**（实测：从「媒体库」按 → ，
+                    焦点直接落到「设置」上，排序被跳过）。
+
+                    为什么是这里：它是「这一页怎么排」的动作，跟分类是一套东西，
+                    放在分类列表头上，↓ 就是「选哪个库」，动作链是一条直线。
+                -->
+                <TextView
+                    android:id="@+id/lib_sort_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="52dp"
+                    android:background="@drawable/bg_lib_tab"
+                    android:clickable="true"
+                    android:ellipsize="end"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:gravity="center_vertical"
+                    android:maxLines="1"
+                    android:paddingLeft="14dp"
+                    android:paddingRight="12dp"
+                    android:textColor="@color/lib_tab_text"
+                    android:textSize="16sp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="2dp"
+                    android:layout_marginBottom="6dp"
+                    android:background="@color/stroke_subtle" />
+
+                <ScrollView
+                    android:id="@+id/scroll_lib_tabs"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:clipToPadding="false"
+                    android:scrollbars="none">
+
+                    <!--
+                        底部这段空白给了 ScrollView「多滚一屏」的余量。
+                        ⚠️ 必须加在里面这层 LinearLayout 上，不能加在 ScrollView 的 paddingBottom 上：
+                            ScrollView 的 padding 只是在可视区里让出空间，**不增加可滚动范围**，
+                            实测最后一项（第 14 个库）永远只露出 12px、`requestChildRectangleOnScreen`
+                            返回 false 也推不动。
+                    -->
+                    <LinearLayout
+                        android:id="@+id/lib_tab_column"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:paddingBottom="64dp" />
+                </ScrollView>
+            </LinearLayout>
+
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1">
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/rv_library_grid"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:paddingLeft="4dp"
+                    android:paddingRight="18dp"
+                    android:paddingBottom="32dp"
+                    android:scrollbars="none" />
+
+                <!--
+                    切库时的转圈：只盖在**海报墙这块**，不盖左栏，也不盖顶栏。
+
+                    为什么要它：切库会把网格清空（留着上一库的海报是错的），
+                    而取一页要一两秒 —— 那两秒里右半边是纯黑，
+                    看着跟「这个库是空的」分不出来。左栏有分类在响应方向键，
+                    所以这里不要全屏遮罩，只在内容区中间转就行。
+                -->
+                <LinearLayout
+                    android:id="@+id/box_lib_loading"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <work.luxiaoxiao.myembyhub.ui.LoadingOrbit
+                        android:id="@+id/pb_lib_spinner"
+                        android:layout_width="@dimen/loading_orbit_size"
+                        android:layout_height="@dimen/loading_orbit_size" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="18dp"
+                        android:text="@string/loading"
+                        android:textColor="@color/content_secondary"
+                        android:textSize="18sp" />
+                </LinearLayout>
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- 搜索页 -->
+        <LinearLayout
+            android:id="@+id/page_search"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingTop="@dimen/home_nav_bar_height"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingLeft="18dp"
+                android:paddingRight="18dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:id="@+id/btn_search_box"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_chip"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:clickable="true"
+                    android:singleLine="true"
+                    android:paddingLeft="18dp"
+                    android:paddingRight="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
+                    android:text="@string/search_box_hint"
+                    android:textColor="@color/content_secondary"
+                    android:textSize="16sp" />
+
+                <!--
+                    手机扫码输入。电视上没有软键盘，逐字按方向键选字母是几十次按键，
+                    这条路才是电视上真正能用的输入方式（老界面里一直有，三页统一后搬过来）。
+                -->
+                <TextView
+                    android:id="@+id/btn_phone_search"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="12dp"
+                    android:background="@drawable/bg_nav_action"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:clickable="true"
+                    android:paddingLeft="18dp"
+                    android:paddingRight="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
+                    android:text="@string/search_phone"
+                    android:textColor="@color/nav_action_text"
+                    android:textSize="16sp" />
+            </LinearLayout>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rv_search_grid"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingLeft="18dp"
+                android:paddingRight="18dp"
+                android:paddingBottom="32dp"
+                android:scrollbars="none" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/home_nav_bar_height"
+            android:background="@drawable/bg_top_fade" />
+
+        <LinearLayout
+            android:id="@+id/nav_bar"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/home_nav_bar_height"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingLeft="14dp"
+            android:paddingRight="14dp" />
+    </FrameLayout>
+
+    <!--
+        加载中：顶栏下面一条 3dp 的跑马灯，横贯整屏。
+        早先是右上角一个转圈，结果它跟顶栏的「设置」按钮、搜索页的「手机输入」按钮
+        抢同一块地方，截图上看起来像按钮上多了个「）」。
+        改成贴着顶栏底边的一条，永远不会压到任何按钮。
+    -->
+    <ProgressBar
+        android:id="@+id/pb_home_loading"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:layout_gravity="top"
+        android:layout_marginTop="@dimen/home_nav_bar_height"
+        android:indeterminate="true"
+        android:indeterminateBehavior="repeat"
+        android:visibility="gone" />
+
+    <!--
+        转圈 + 一句话，居中显示。
+        `pb_home_loading` 那条 3dp 跑马灯只说明「在忙」，但顶栏底下一条线在电视三米外
+        基本看不见；取数要十几秒，屏幕上得有个「明摆着在转」的东西。
+        跟着 `tv_home_hint` 一起居中，但不共用一个 View：
+        提示语是结果（加载失败/这里没内容），转圈是过程，两者可能同时需要。
+
+        用自绘的 `LoadingOrbit` 而不是系统 ProgressBar：4.3 的系统转圈是 Holo 青色，
+        跟这套暖色语言对不上，而且是帧图轮播，低端机上比一笔弧线贵得多。
+    -->
+    <LinearLayout
+        android:id="@+id/box_home_loading"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <work.luxiaoxiao.myembyhub.ui.LoadingOrbit
+            android:id="@+id/pb_home_spinner"
+            android:layout_width="@dimen/loading_orbit_size"
+            android:layout_height="@dimen/loading_orbit_size" />
+
+        <TextView
+            android:id="@+id/tv_home_loading"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/loading"
+            android:textColor="@color/content_secondary"
+            android:textSize="18sp" />
+    </LinearLayout>
+
+    <!-- 空列表 / 加载失败时的居中提示 -->
+    <TextView
+        android:id="@+id/tv_home_hint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:textColor="@color/content_secondary"
+        android:textSize="18sp"
+        android:visibility="gone" />
+
+</FrameLayout>

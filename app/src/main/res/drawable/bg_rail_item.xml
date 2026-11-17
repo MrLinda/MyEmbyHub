@@ -13,20 +13,20 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_focused="true">
         <shape android:shape="rectangle">
-            <solid android:color="@color/surface_lift" />
-            <stroke android:width="2dp" android:color="@color/accent" />
+            <solid android:color="@color/surface_overlay" />
+            <stroke android:width="2dp" android:color="@color/focus_border" />
             <corners android:radius="8dp" />
         </shape>
     </item>
     <item android:state_selected="true">
         <shape android:shape="rectangle">
-            <solid android:color="@color/surface" />
+            <solid android:color="@color/surface_raised" />
             <corners android:radius="8dp" />
         </shape>
     </item>
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
-            <solid android:color="@color/surface_lift" />
+            <solid android:color="@color/surface_overlay" />
             <corners android:radius="8dp" />
         </shape>
     </item>

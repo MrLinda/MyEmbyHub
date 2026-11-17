@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        顶部 tab。**只放能切换页面的一项**，设置不在里面（它是弹出菜单，不参与切换）。
+
+        顺序 = HomeActivity 里 switchTab 的编号，改这里要同步改那边。
+    -->
+    <string-array name="home_nav_titles">
+        <item>首页</item>
+        <item>媒体库</item>
+        <item>搜索</item>
+    </string-array>
+
+    <string name="home_more">更多 ›</string>
+    <string name="home_resume">继续观看</string>
+    <string name="home_empty">服务器上还没有内容</string>
+    <string name="home_failed">加载失败：%1$s</string>
+
+    <!-- 顶栏最右侧的独立按钮，不参与 tab 切换 -->
+    <string name="home_settings">设置</string>
+    <!-- 只在媒体库页出现的排序入口 + 它的菜单标题 -->
+    <string name="home_sort">排序</string>
+    <string name="home_sort_title">排序方式</string>
+    <!-- 左栏那一行：%1$s 已经带好方向箭头（片名 ↑ / 年份 ↓） -->
+    <string name="home_sort_fmt">排序 · %1$s</string>
+    <!-- 菜单里的两个分组标题（禁用行，不可聚焦） -->
+    <string name="home_sort_field">排序字段</string>
+    <string name="home_sort_dir">方向</string>
+    <string name="home_sort_current">当前</string>
+    <string name="home_sort_desc">降序</string>
+    <string name="home_sort_asc">升序</string>
+
+    <!-- 媒体库页 -->
+    <string name="library_empty">这个库里还没有内容</string>
+
+    <!-- 搜索页 -->
+    <string name="search_box_hint">搜索片名 / 演员</string>
+    <string name="search_phone">手机输入</string>
+    <string name="search_guide">按确认键输入片名，或点「手机输入」用手机扫码搜索</string>
+    <string name="search_empty">没有找到相关内容</string>
+    <string name="search_failed">搜索失败：%1$s</string>
+</resources>

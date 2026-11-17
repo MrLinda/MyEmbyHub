@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 库 chip / 搜索框的文字色：焦点或选中都是暖色，其余是次级文字色。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="@color/content_accent" />
+    <item android:state_selected="true" android:color="@color/content_accent" />
+    <item android:color="@color/content_secondary" />
+</selector>

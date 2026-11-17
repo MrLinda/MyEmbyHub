@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    媒体库左栏 tab 的文字色。
+
+    「选中」比「焦点」更重：选中的那个库标题变暖色（陪右边那面墙），
+    只是路过（焦点在它上面但还没切过去）时是正常亮色，别让人误以为已经切了。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true" android:state_focused="true" android:color="@color/content_accent" />
+    <item android:state_selected="true" android:color="@color/content_accent" />
+    <item android:state_focused="true" android:color="@color/content_primary" />
+    <item android:color="@color/content_secondary" />
+</selector>

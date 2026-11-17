@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    首页的一张海报卡片。
+
+    150×222dp 是 2:3，跟绝大多数海报图比例一致（服务端 centerCrop 一下正好）。
+    一屏横向露 6 张半：故意让第 7 张被切一刀，比排满 6 张更容易让人知道「右边还有」。
+
+    三层叠放的顺序：占位字 → 海报 → 标题条，进度条最后压在最上面。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="150dp"
+    android:layout_height="222dp"
+    android:layout_margin="6dp"
+    android:background="@drawable/bg_card"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:clickable="true">
+
+    <!-- 海报还没到 / 这张条目没有图时显示的占位：取片名第一个字 -->
+    <TextView
+        android:id="@+id/tv_poster_ph"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:textSize="44sp"
+        android:textColor="@color/content_disabled" />
+
+    <ImageView
+        android:id="@+id/img_poster"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:contentDescription="@null" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="vertical"
+        android:background="@drawable/bg_home_poster_title"
+        android:paddingLeft="10dp"
+        android:paddingRight="10dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="9dp">
+
+        <TextView
+            android:id="@+id/tv_poster_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:textSize="14sp"
+            android:textColor="@color/content_primary" />
+    </LinearLayout>
+
+    <!-- 看过一半的条目在卡片最底下显示一条进度 -->
+    <ProgressBar
+        android:id="@+id/pb_poster_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:layout_gravity="bottom"
+        android:max="100"
+        android:progress="0"
+        android:visibility="gone" />
+
+    <!--
+        焦点圈：必须是最后一个子视图。
+        海报是全铺的 ImageView，会把卡片背景上的 state_focused 描边整个盖住，
+        所以焦点态要单独画在**最上层**（见 bg_card_ring 的注释）。
+    -->
+    <View
+        android:id="@+id/focus_ring"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/bg_card_ring"
+        android:clickable="false"
+        android:duplicateParentState="true"
+        android:focusable="false" />
+
+</FrameLayout>

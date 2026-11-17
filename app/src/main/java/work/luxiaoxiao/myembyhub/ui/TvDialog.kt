@@ -8,6 +8,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -51,7 +52,7 @@ object TvDialog {
     ): Dialog {
         val tv = TextView(ctx).apply {
             text = message
-            setTextColor(ContextCompat.getColor(ctx, R.color.text_primary))
+            setTextColor(ContextCompat.getColor(ctx, R.color.content_primary))
             textSize = 16f
             setLineSpacing(0f, 1.25f)
         }
@@ -71,7 +72,7 @@ object TvDialog {
     ): Dialog {
         val tv = TextView(ctx).apply {
             text = message
-            setTextColor(ContextCompat.getColor(ctx, R.color.text_primary))
+            setTextColor(ContextCompat.getColor(ctx, R.color.content_primary))
             textSize = 16f
             setLineSpacing(0f, 1.25f)
         }
@@ -136,6 +137,20 @@ object TvDialog {
         // 窗口背景透明：只留自绘面板，系统那个九宫格边框不要
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.show()
+        // ⚠️ 对话框是独立窗口，弹出时 Activity 失焦、系统栏会**重新冒出来**
+        //    （底部那排返回/主页/任务）。Activity 那边的 onWindowFocusChanged 管不到它，
+        //    只能在对话框自己的窗口上再收一次。
+        dialog.window?.let { w ->
+            w.setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+            )
+            @Suppress("DEPRECATION")
+            w.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LOW_PROFILE
+        }
         // 宽度固定（要在 show() 之后设置，否则不生效）
         val width = (560 * dialog.context.resources.displayMetrics.density).toInt()
         dialog.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)

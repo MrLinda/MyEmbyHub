@@ -8,6 +8,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -77,9 +78,9 @@ object TvMenu {
             holder.sub.visibility = if (item.sub.isEmpty()) View.INVISIBLE else View.VISIBLE
 
             val main = ContextCompat.getColor(
-                ctx, if (item.enabled) R.color.text_primary else R.color.text_disabled)
+                ctx, if (item.enabled) R.color.content_primary else R.color.content_disabled)
             val second = ContextCompat.getColor(
-                ctx, if (item.enabled) R.color.text_secondary else R.color.text_disabled)
+                ctx, if (item.enabled) R.color.content_secondary else R.color.content_disabled)
             holder.title.setTextColor(main)
             holder.sub.setTextColor(second)
 
@@ -143,17 +144,23 @@ object TvMenu {
         provider: () -> List<Item>,
         onDismiss: (() -> Unit)? = null
     ) {
-        // 点击回调里要用 adapter 重新渲染，而 adapter 又要拿这个回调 → 用 lateinit 解开循环
+        // 点击回调里要用 adapter / rv 重新渲染，而它俩又要拿这个回调 → 用 lateinit 解开循环
         lateinit var adapter: MenuAdapter
+        lateinit var rv: RecyclerView
         adapter = MenuAdapter { which ->
             val item = provider().getOrNull(which)
             if (item != null && item.enabled) {
                 item.action.invoke()
                 adapter.bind(provider())
+                // ⚠️ notifyDataSetChanged 会把行全部拆掉重建，**焦点跟着没了** ——
+                // 菜单此刻还开着，用户再按方向键会毫无反应（看着像卡死）。
+                // 既然 showPersistent 的意义就是「点完继续改」，就得把焦点放回同一行。
+                rv.post { rv.findViewHolderForAdapterPosition(which)?.itemView?.requestFocus() }
             }
         }
         adapter.bind(provider())
-        val (dlg, rv) = buildDialog(ctx, title, adapter, onDismiss)
+        val (dlg, list) = buildDialog(ctx, title, adapter, onDismiss)
+        rv = list
         showDialog(dlg, rv, provider())
     }
 
@@ -187,6 +194,18 @@ object TvMenu {
         // 窗口背景透明：只留自绘的面板，系统那个九宫格边框不要
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.show()
+        // 对话框是独立窗口，弹出时 Activity 失焦、系统栏会重新冒出来 —— 在自己窗口上再收一次
+        dialog.window?.let { w ->
+            w.setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+            )
+            @Suppress("DEPRECATION")
+            w.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LOW_PROFILE
+        }
         // 宽度固定（电视上 1280dp 宽，菜单 560dp 刚好留出两边余量）
         val width = (560 * dialog.context.resources.displayMetrics.density).toInt()
         dialog.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)

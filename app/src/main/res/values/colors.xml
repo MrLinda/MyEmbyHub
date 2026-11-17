@@ -1,24 +1,170 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    ============================================================================
+    颜色令牌（token）层
+    ============================================================================
+
+    分两层，两层职责严格分开：
+
+      【第一层 · 调色板】palette_*
+          **唯一允许出现 `#` 色值的地方**。这一层只描述「这个颜色长什么样」，
+          不描述「它用在哪」。换整套配色只改这一层。
+
+      【第二层 · 语义】surface_* / content_* / focus_* / ...
+          **全工程只准引用这一层**（布局、drawable、selector、Kotlin 都算）。
+          这一层只描述「这个颜色扮演什么角色」，不描述它长什么样。
+
+    为什么这么分：
+      - 以前 `bg` / `surface` / `accent` 这些名字是「长相名」。想加亮色主题时，
+        得把 12 处引用 `accent` 的地方逐个判断哪些该跟着变、哪些不该 —— 必漏。
+      - 现在 `surface_base` 永远表示「最底那层背景」，`focus_border` 永远表示
+        「焦点描边」。加 `values-night/` 或 `values-light/` 时只要重写第二层，
+        布局文件一行都不用动。
+
+    ⚠️ 一条硬规则：**除了本文件，任何地方都不准再出现 `#` 色值和 `palette_*` 引用。**
+       守住这条，主题系统就是干净的；破一次，两个月后就会退回「一堆硬编码」。
+
+    ⚠️ 本文件只有深色一套值。要加亮色主题时新建 `res/values-night/colors.xml`，
+       只重写第二层里那几个跟明暗相关的项，`palette_*` 那层不要动。
+-->
 <resources>
-    <!-- 底色：近黑但带一点冷调，纯黑在电视上会显得发灰 -->
-    <color name="bg">#FF0B0E13</color>
-    <color name="surface">#FF151A22</color>
-    <color name="surface_lift">#FF1F2632</color>
-    <color name="surface_pressed">#FF232936</color>
 
-    <!-- 品牌色：只留给真正的「动作」（登录、播放按钮） -->
-    <color name="brand">#FF3D7EFF</color>
-    <color name="brand_dark">#FF2456B8</color>
+    <!--
+        ========================================================================
+        第一层 · 调色板（只有这里能写色值）
+        ========================================================================
 
-    <!-- 状态色：焦点描边 / 进度条，暖色在深底上更跳 -->
-    <color name="accent">#FFFFB454</color>
-    <color name="accent_soft">#99FFB454</color>
-    <color name="progress_track">#33FFFFFF</color>
+        ink   ：近黑但带一点冷调 —— 纯黑 #000 在电视上会显得发灰（面板漏光）。
+        slate ：中性灰阶，用于文字。
+        amber ：暖强调色，深底上比蓝色更跳，且和海报的暖色系画面不打架。
+        blue  ：品牌色，只留给真正的「动作」（登录按钮这类）。
+    -->
+    <color name="palette_ink_900">#FF0B0E13</color>
+    <color name="palette_ink_800">#FF151A22</color>
+    <color name="palette_ink_700">#FF1F2632</color>
+    <color name="palette_ink_650">#FF232936</color>
+    <color name="palette_ink_600">#FF262C38</color>
 
-    <color name="text_primary">#FFF2F5FA</color>
-    <color name="text_secondary">#FF98A2B3</color>
-    <color name="text_disabled">#FF5A6270</color>
-    <color name="white">#FFFFFFFF</color>
-    <color name="divider">#FF262C38</color>
-    <color name="error">#FFFF6B6B</color>
+    <color name="palette_slate_100">#FFF2F5FA</color>
+    <color name="palette_slate_300">#FF98A2B3</color>
+    <color name="palette_slate_400">#FF5A6270</color>
+
+    <color name="palette_amber_400">#FFFFB454</color>
+    <color name="palette_red_400">#FFFF6B6B</color>
+    <color name="palette_blue_500">#FF3D7EFF</color>
+    <color name="palette_blue_700">#FF2456B8</color>
+
+    <color name="palette_paper">#FFFFFFFF</color>
+
+    <!--
+        带透明度的调色板项：透明度属于「长相」，所以放在这一层，
+        不在语义层里写 #RRGGBBAA。
+    -->
+    <color name="palette_amber_400_60">#99FFB454</color>
+    <color name="palette_amber_400_24">#3DFFB454</color>
+    <color name="palette_amber_400_12">#1FFFB454</color>
+    <color name="palette_white_20">#33FFFFFF</color>
+
+    <!-- 遮罩：纯黑 + 透明度，专给「压在视频画面上」的浮层用 -->
+    <color name="palette_black_53">#88000000</color>
+    <color name="palette_black_70">#B3000000</color>
+    <color name="palette_black_80">#CC000000</color>
+
+    <!-- 终端绿：播放器解码诊断面板的等宽字色，只此一处用 -->
+    <color name="palette_green_300">#FF9BE89B</color>
+
+
+    <!--
+        ========================================================================
+        第二层 · 语义角色（全工程只准引用这一层）
+        ========================================================================
+
+        命名规则：`<角色>_<层级/强度>`，一眼能看出「什么时候用它」，
+        看不出「它是什么颜色」—— 这正是要点。
+    -->
+
+    <!--
+        表面：按「离用户多远」分四级，而不是按「深浅」分。
+        base    = 最底层（窗口 / 屏幕根）
+        raised  = 从背景浮起来的整条栏（顶栏、左栏选中底）
+        overlay = 浮在内容之上的块（卡片聚焦底、弹窗面板）
+        pressed = 按下 / 菜单行聚焦
+        inverse = 反相底（二维码这种必须是纯白的场景）
+    -->
+    <color name="surface_base">@color/palette_ink_900</color>
+    <color name="surface_raised">@color/palette_ink_800</color>
+    <color name="surface_overlay">@color/palette_ink_700</color>
+    <color name="surface_pressed">@color/palette_ink_650</color>
+    <color name="surface_inverse">@color/palette_paper</color>
+
+    <!--
+        强调色：一个基础色 + 一个弱化版。
+        accent_primary = 实心块、指示条、进度条填充
+        accent_muted   = 描边、下划线这类「只需要一点点」的场合
+        accent_container = 可聚焦项的浅底色（强调色 ~24% 透明度）。
+                           12% 压在 surface_base 上几乎看不出来，
+                           电视三米外看就是「没高亮」，所以定在 24%。
+        accent_follows_theme 由代码决定（强调色跟不跟随主题），
+        这里只是把「强调色可以换」这件事在结构上留出位置。
+    -->
+    <color name="accent_primary">@color/palette_amber_400</color>
+    <color name="accent_muted">@color/palette_amber_400_60</color>
+    <color name="accent_container">@color/palette_amber_400_24</color>
+
+    <!--
+        焦点：按「控件角色」分，不按「长相」分。
+        现在只有一种描边 + 一种弱描边，将来要做「导航项聚焦」「卡片聚焦」分开时，
+        在这里加 focus_border_nav / focus_border_card 即可，不用去改 drawable。
+    -->
+    <color name="focus_border">@color/accent_primary</color>
+    <color name="focus_border_muted">@color/accent_muted</color>
+
+    <!-- 指示条：左栏暖色竖条、弹窗标题左侧的竖条，同一个视觉语言 -->
+    <color name="indicator_bar">@color/accent_primary</color>
+
+    <!-- 进度条 -->
+    <color name="progress_fill">@color/accent_primary</color>
+    <color name="progress_track">@color/palette_white_20</color>
+
+    <!--
+        内容（文字 / 图标）：按「重要度」分，不按「灰度」分。
+    -->
+    <color name="content_primary">@color/palette_slate_100</color>
+    <color name="content_secondary">@color/palette_slate_300</color>
+    <color name="content_disabled">@color/palette_slate_400</color>
+    <!-- 选中项的标题色（左栏当前打开的类别） -->
+    <color name="content_accent">@color/accent_primary</color>
+    <!-- 压在强调色实心底上的文字（主按钮聚焦时） -->
+    <color name="content_on_accent">@color/palette_ink_900</color>
+    <color name="content_error">@color/palette_red_400</color>
+
+    <!-- 描边 / 分隔线 -->
+    <color name="stroke_subtle">@color/palette_ink_600</color>
+
+    <!--
+        品牌动作色：只用于「按下去会发生重要事情」的按钮（登录、播放）。
+        ⚠️ 焦点态不要用它 —— 焦点统一走 focus_border 的暖色，
+        否则遥控器一动就会看到两种强调色打架。
+    -->
+    <color name="action_primary">@color/palette_blue_500</color>
+    <color name="action_primary_pressed">@color/palette_blue_700</color>
+
+    <!--
+        二维码底：**必须是纯白**。
+        扫码识别靠对比度，换成 surface_inverse 之外的任何值都会掉识别率 ——
+        这条约束写在这里，防止将来有人「顺手统一成暗色」。
+    -->
+    <color name="qrcode_backdrop">@color/palette_paper</color>
+
+    <!--
+        视频浮层：压在视频画面上的几块底。分三档而不是一档，
+        因为「说明文字」「缓冲提示」「诊断面板」对画面的遮挡程度要求不同。
+    -->
+    <color name="scrim_soft">@color/palette_black_53</color>
+    <color name="scrim_medium">@color/palette_black_70</color>
+    <color name="scrim_heavy">@color/palette_black_80</color>
+
+    <!-- 播放器诊断面板的等宽字色（终端绿，读起来像日志） -->
+    <color name="content_diag">@color/palette_green_300</color>
+
 </resources>

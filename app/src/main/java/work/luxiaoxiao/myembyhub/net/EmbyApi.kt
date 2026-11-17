@@ -168,8 +168,14 @@ class EmbyApi(
         "Id,Name,Type,MediaType,IsFolder,Container,Size,ProductionYear,IndexNumber," +
             "ParentIndexNumber,SeriesId,SeriesName,MediaSources,RunTimeTicks,UserData"
 
-    /** 详情用：列表字段 + `Overview`。 */
-    private val DETAIL_FIELDS = "$LIST_FIELDS,Overview"
+    /**
+     * 详情用：列表字段 + `Overview` + 分级/评分/类型。
+     *
+     * 后三个只在详情页显示，列表里用不上 —— 列表页一页几十上百条，
+     * 每条都拖着 `Genres` 数组会让 JSON 明显变大（这台电视解析不起）。
+     */
+    private val DETAIL_FIELDS =
+        "$LIST_FIELDS,Overview,OfficialRating,CommunityRating,Genres"
 
     /** 把 `{Items:[...]}` 解析成 [MediaItem] 列表。 */
     private fun parseItems(body: String, skipFolders: Boolean = false): List<MediaItem> {
@@ -205,6 +211,15 @@ class EmbyApi(
             }
         }
         val ud = o.optJSONObject("UserData")
+        // 类型标签在 Emby 里是数组（["科幻","悬疑"]），拼成一行直接给 TextView 用。
+        // 分隔符用全角斜杠而不是逗号 —— 中文片名里逗号太常见，会跟标题混在一起。
+        val genresArr = o.optJSONArray("Genres")
+        val genres = if (genresArr == null) "" else buildString {
+            for (i in 0 until genresArr.length()) {
+                if (isNotEmpty()) append(" / ")
+                append(genresArr.optString(i))
+            }
+        }
         return MediaItem(
             id = o.optString("Id"),
             name = o.optString("Name"),
@@ -223,7 +238,11 @@ class EmbyApi(
             parentIndexNumber = o.optInt("ParentIndexNumber", 0),
             runtimeTicks = o.optLong("RunTimeTicks", 0),
             played = ud?.optBoolean("Played", false) ?: false,
-            positionTicks = ud?.optLong("PlaybackPositionTicks", 0) ?: 0
+            positionTicks = ud?.optLong("PlaybackPositionTicks", 0) ?: 0,
+            productionYear = o.optInt("ProductionYear", 0),
+            officialRating = o.optString("OfficialRating"),
+            communityRating = o.optDouble("CommunityRating", 0.0),
+            genres = genres
         )
     }
 
@@ -257,7 +276,9 @@ class EmbyApi(
         includeVideo: Boolean = true,
         limit: Int = 200,
         sortBy: String = SortOption.SORT_NAME,
-        descending: Boolean = false
+        descending: Boolean = false,
+        includeItemTypes: String = "",
+        startIndex: Int = 0
     ): Result<List<MediaItem>> {
         return try {
             // ⚠️ **不要加 `MediaTypes=Video`**：
@@ -266,10 +287,17 @@ class EmbyApi(
             //    剧集库里第一层就空了（动画电影库因为直接是 Movie 所以看着正常）。
             //    `IncludeMedia=Video` 只影响「是否附带媒体信息」，不影响条目类型，可以留。
             val filter = if (includeVideo) "&IncludeMedia=Video" else ""
+            // ⚠️ 递归列库时**必须**带 `IncludeItemTypes`：
+            //    这个 Emby 库里每个影片外面还套了一层同名文件夹
+            //    （「恐怖X档案 (2022)」folder 里面才是 Movie「恐怖X档案」），
+            //    不带类型过滤就会拿回一半「文件夹」，海报墙上出现两套同名卡片。
+            val types = if (includeItemTypes.isNotEmpty()) "&IncludeItemTypes=$includeItemTypes" else ""
             val order = if (descending) "Descending" else "Ascending"
+            // StartIndex 用于海报墙翻页（Emby 默认从 0 开始）
+            val start = if (startIndex > 0) "&StartIndex=$startIndex" else ""
             val resp = get(
-                "/Items?ParentId=$parentId&Recursive=$recursive$filter&Limit=$limit" +
-                    "&Fields=$LIST_FIELDS&SortBy=$sortBy&SortOrder=$order"
+                "/Items?ParentId=$parentId&Recursive=$recursive$filter$types&Limit=$limit" +
+                    "&Fields=$LIST_FIELDS&SortBy=$sortBy&SortOrder=$order$start"
             )
             Result.success(parseItems(resp.body))
         } catch (e: Throwable) {
@@ -305,6 +333,25 @@ class EmbyApi(
         return try {
             val resp = get(
                 "/Users/${uid()}/Items/Resume?MediaTypes=Video&Limit=$limit&Fields=$LIST_FIELDS"
+            )
+            Result.success(parseItems(resp.body))
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 一部剧的全部剧集（详情页「选集」用）。
+     *
+     * 排序必须写 `ParentIndexNumber,IndexNumber`：
+     * 只按 `IndexNumber` 排的话，第 2 季第 1 集会排到第 1 季第 5 集前面 ——
+     * Emby 里 `IndexNumber` 只是「季内集号」，跨季会重复。
+     */
+    fun episodes(seriesId: String, limit: Int = 300): Result<List<MediaItem>> {
+        return try {
+            val resp = get(
+                "/Shows/$seriesId/Episodes?UserId=${uid()}&Limit=$limit" +
+                    "&SortBy=ParentIndexNumber,IndexNumber&Fields=$LIST_FIELDS"
             )
             Result.success(parseItems(resp.body))
         } catch (e: Throwable) {
@@ -521,7 +568,16 @@ fun friendlyError(e: Throwable): String {
             "服务器拒绝连接"
         msg.contains("failed to connect", ignoreCase = true) ->
             "连不上服务器，检查网络"
+        // 网关层错误：服务器本体没起来 / Cloudflare Tunnel 断了。
+        // ⚠️ 这种响应体常常是一大坨 HTML 或 JSON（实测 Cloudflare 530 回的是
+        //    {"type":"https://developers.cloudflare.com/...","title":"Error 1033..."}），
+        //    整段怼到电视屏幕上会糊满整页，而且用户一个字也用不上。
+        msg.contains("HTTP 530") || msg.contains("HTTP 502") ||
+            msg.contains("HTTP 503") || msg.contains("HTTP 504") ->
+            "服务器暂时不可用，稍后再试"
         msg.isEmpty() -> e.javaClass.simpleName
+        // 兜底：响应体是 JSON / HTML 就只留开头一小段，别糊满屏幕。
+        msg.contains("{") || msg.contains("<") -> msg.take(60) + "…"
         else -> msg
     }
 }
@@ -559,17 +615,37 @@ object SortOption {
      */
     const val SORT_INDEX_NUMBER = "IndexNumber"
 
-    data class Opt(val key: String, val label: String)
+    /**
+     * 一种排序方式。
+     *
+     * [descending] 是这一项**自带的默认方向**，用在两个地方：
+     * ① 没存过排序时的默认；② 用户换到这个字段时方向重置成它。
+     * （方向本身用户还可以再单独改，见 HomeActivity.libSortDesc。）
+     */
+    data class Opt(val key: String, val label: String, val descending: Boolean = false)
 
+    /**
+     * 菜单里的顺序：**默认那一项排最前面**，用户一眼看到的就是出厂设置。
+     *
+     * 默认是「开播时间」降序而不是「最近添加」：
+     * 库里的「加入时间」取决于什么时候拷进去的（一次补齐的季整批同一天，
+     * 全排在前面），而开播时间才是内容本身的先后 —— 翻新片看它更准。
+     */
     val ALL = listOf(
-        Opt(SORT_NAME, "名称"),
-        Opt(SORT_DATE_CREATED, "加入时间"),
-        Opt(SORT_PREMIERE_DATE, "首播/上映时间"),
-        Opt(SORT_PRODUCTION_YEAR, "年份"),
-        Opt(SORT_RUNTIME, "时长")
+        Opt(SORT_PREMIERE_DATE, "开播时间", descending = true),
+        Opt(SORT_DATE_CREATED, "最近添加", descending = true),
+        Opt(SORT_NAME, "片名"),
+        Opt(SORT_PRODUCTION_YEAR, "年份", descending = true),
+        Opt(SORT_RUNTIME, "时长", descending = true)
     )
 
-    fun labelOf(key: String): String = ALL.firstOrNull { it.key == key }?.label ?: "名称"
+    /** 出厂默认：开播时间降序。 */
+    val DEFAULT: Opt = ALL.first()
+
+    fun labelOf(key: String): String = ALL.firstOrNull { it.key == key }?.label ?: DEFAULT.label
+
+    /** 按 key 取一项；找不到（没存过 / 存的值不认识）就退回 [DEFAULT]。 */
+    fun of(key: String): Opt = ALL.firstOrNull { it.key == key } ?: DEFAULT
 }
 
 /**
@@ -601,7 +677,15 @@ data class MediaItem(
     /** 用户是否已看完。 */
     val played: Boolean = false,
     /** 上次播放到的位置（100ns ticks）。 */
-    val positionTicks: Long = 0
+    val positionTicks: Long = 0,
+    /** 出品年份，0 表示服务器没给。 */
+    val productionYear: Int = 0,
+    /** 分级（「PG-13」「TV-MA」这类），可能为空。 */
+    val officialRating: String = "",
+    /** 评分（0~10），0 表示没有。 */
+    val communityRating: Double = 0.0,
+    /** 类型标签，已拼成「科幻 / 悬疑」这种可直接显示的样子。 */
+    val genres: String = ""
 ) {
     /** 续播起点（毫秒）。 */
     val resumeMs: Long get() = positionTicks / 10_000

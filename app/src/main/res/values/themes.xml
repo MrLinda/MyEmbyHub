@@ -16,13 +16,13 @@
         颜色仍然走自己的 @color/*，不依赖主题的 colorPrimary 那套语义。
     -->
     <style name="Theme.MyEmbyHub" parent="android:Theme.Holo.NoActionBar">
-        <item name="android:colorBackground">@color/bg</item>
-        <item name="android:textColorPrimary">@color/text_primary</item>
-        <item name="android:textColorSecondary">@color/text_secondary</item>
-        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:colorBackground">@color/surface_base</item>
+        <item name="android:textColorPrimary">@color/content_primary</item>
+        <item name="android:textColorSecondary">@color/content_secondary</item>
+        <item name="android:windowBackground">@color/surface_base</item>
         <!-- 系统对话框（更新/二维码/服务器信息）在 4.3 上默认是 Holo 蓝，
              换成暖色才和整个 App 一套语言 -->
-        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:colorAccent">@color/accent_primary</item>
     </style>
 
     <!--
@@ -37,7 +37,7 @@
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowIsFloating">true</item>
         <item name="android:backgroundDimEnabled">true</item>
-        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:colorAccent">@color/accent_primary</item>
         <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
     </style>
 
@@ -52,13 +52,13 @@
     </style>
 
     <style name="TvTitle">
-        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textColor">@color/content_primary</item>
         <item name="android:textSize">22sp</item>
         <item name="android:textStyle">bold</item>
     </style>
 
     <style name="TvSubtitle">
-        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textColor">@color/content_secondary</item>
         <item name="android:textSize">14sp</item>
     </style>
 </resources>

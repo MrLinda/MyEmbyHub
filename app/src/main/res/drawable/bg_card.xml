@@ -2,28 +2,28 @@
 <!--
     右侧内容行。
 
-    焦点态用暖色（@color/accent）描边而不是品牌蓝：
+    焦点态用暖色（@color/focus_border）描边而不是品牌蓝：
     深色背景上暖色对比更强，且和海报的暖色系画面不打架。
 -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_focused="true">
         <shape android:shape="rectangle">
-            <solid android:color="@color/surface_lift" />
-            <stroke android:width="2dp" android:color="@color/accent" />
+            <solid android:color="@color/surface_overlay" />
+            <stroke android:width="2dp" android:color="@color/focus_border" />
             <corners android:radius="12dp" />
         </shape>
     </item>
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
-            <solid android:color="@color/surface_lift" />
-            <stroke android:width="2dp" android:color="@color/accent_soft" />
+            <solid android:color="@color/surface_overlay" />
+            <stroke android:width="2dp" android:color="@color/accent_muted" />
             <corners android:radius="12dp" />
         </shape>
     </item>
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="@color/surface" />
-            <stroke android:width="1dp" android:color="@color/divider" />
+            <solid android:color="@color/surface_raised" />
+            <stroke android:width="1dp" android:color="@color/stroke_subtle" />
             <corners android:radius="12dp" />
         </shape>
     </item>

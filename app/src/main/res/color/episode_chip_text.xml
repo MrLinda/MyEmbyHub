@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    剧集条目文字色。
+    顺序有讲究：focused 必须排在 selected 前面 —— Android 按顺序匹配，
+    一旦某个 item 先命中就停。焦点在「该看的那一集」上时，要显示焦点的颜色。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="@color/content_accent" />
+    <item android:state_selected="true" android:color="@color/content_accent" />
+    <item android:color="@color/content_primary" />
+</selector>

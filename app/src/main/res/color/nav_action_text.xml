@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    顶栏「设置」按钮的文字色。
+
+    chip_text 的默认态是 content_secondary（次要信息色），放在顶栏上偏灰，
+    配上空心底更强化了「不可点」的错觉。这里默认给 content_primary（正文色），
+    焦点态才转暖色 —— 层级仍然是「tab > 设置」，但至少看得出能按。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="@color/content_accent" />
+    <item android:color="@color/content_primary" />
+</selector>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    顶栏尺寸。
+
+    这两个值是**一对**：顶栏高度 76dp、里面的焦点药丸 60dp，上下各剩 8dp（约 10%）。
+    药丸原来铺满整个 76dp，焦点态看着顶天立地、跟内容区挤在一起；
+    留出上下空白后，顶栏才像一条「浮」在内容上的条带，而不是压在内容上的一块板。
+
+    ⚠️ 改这两个值要一起看：药丸高度 ≥ 文字行高（20sp ≈ 27dp）+ 下划线（3dp）+ 间距，
+       太小会把下划线挤出去；顶栏高度也别低于药丸高度，否则药丸会被裁掉。
+-->
+<resources>
+    <!-- 顶栏（含渐隐层、内容区让位、加载条位置，全部引用这一个值） -->
+    <dimen name="home_nav_bar_height">76dp</dimen>
+    <!-- 顶栏里 tab 的焦点药丸高度：76 - 8*2 = 60 -->
+    <dimen name="home_nav_pill_height">60dp</dimen>
+    <!--
+        顶栏最右那个「设置」的位置：**不再是半高的动作按钮**，而是跟 tab 同款的药丸
+        （同一个 `item_home_nav`），只是被一个 weight=1 的 Space 推到右边去。
+        这里只留它在左边缘那个 28dp 的右边距 —— 和内容区右缘对齐。
+    -->
+    <dimen name="home_nav_action_margin">28dp</dimen>
+    <!-- 居中加载转圈的直径；三米外要看得见，别再小 -->
+    <dimen name="loading_orbit_size">56dp</dimen>
+</resources>

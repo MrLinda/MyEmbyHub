@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:orientation="horizontal"
     android:padding="36dp"
-    android:background="@color/bg">
+    android:background="@color/surface_base">
 
     <!-- 左侧：电视端直接输入 -->
     <LinearLayout
@@ -37,8 +37,8 @@
             android:hint="@string/hint_server"
             android:inputType="textUri"
             android:singleLine="true"
-            android:textColor="@color/text_primary"
-            android:textColorHint="@color/text_secondary"
+            android:textColor="@color/content_primary"
+            android:textColorHint="@color/content_secondary"
             android:background="@drawable/bg_card"
             android:paddingLeft="14dp"
             android:paddingRight="14dp"
@@ -54,8 +54,8 @@
             android:hint="@string/hint_user"
             android:inputType="text"
             android:singleLine="true"
-            android:textColor="@color/text_primary"
-            android:textColorHint="@color/text_secondary"
+            android:textColor="@color/content_primary"
+            android:textColorHint="@color/content_secondary"
             android:background="@drawable/bg_card"
             android:paddingLeft="14dp"
             android:paddingRight="14dp"
@@ -72,8 +72,8 @@
             android:hint="@string/hint_password"
             android:inputType="textPassword"
             android:singleLine="true"
-            android:textColor="@color/text_primary"
-            android:textColorHint="@color/text_secondary"
+            android:textColor="@color/content_primary"
+            android:textColorHint="@color/content_secondary"
             android:background="@drawable/bg_card"
             android:paddingLeft="14dp"
             android:paddingRight="14dp"
@@ -116,7 +116,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:textColor="@color/text_secondary"
+            android:textColor="@color/content_secondary"
             android:textSize="15sp" />
 
     </LinearLayout>
@@ -142,7 +142,7 @@
             android:id="@+id/img_qr"
             android:layout_width="320dp"
             android:layout_height="320dp"
-            android:background="@color/white"
+            android:background="@color/qrcode_backdrop"
             android:padding="8dp"
             android:focusable="true"
             android:contentDescription="登录二维码" />

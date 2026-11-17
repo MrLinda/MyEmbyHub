@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    详情页：左边海报 + 右边标题/信息/简介/按钮，底下（剧集才有）一整排选集。
+
+    为什么是「一页」而不是弹窗：电视上从海报墙点进一部剧，用户想看的是
+    「这剧讲什么、我该从第几集看」，这需要整屏的宽度放简介和剧集列表；
+    塞进 560dp 宽的弹窗里，简介只能露三行，剧集还得再套一层滚动。
+
+    背景是「剧照 + 左黑右透的渐变」，不用纯色底 —— 纯色详情页在 55 寸屏幕上
+    看起来像一张空表格，而且剧照本身是最好的「这是哪部片」的提示。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/surface_base">
+
+    <!-- 剧照。alpha 压在 0.55：太亮会跟正文抢注意力，太暗等于没放。 -->
+    <ImageView
+        android:id="@+id/img_backdrop"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:alpha="0.55"
+        android:scaleType="centerCrop"
+        android:visibility="invisible" />
+
+    <!-- 左边压黑、右边透明的遮罩。必须铺在剧照上面、正文下面。 -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/bg_detail_scrim" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical"
+        android:orientation="vertical"
+        android:paddingLeft="60dp"
+        android:paddingTop="30dp"
+        android:paddingRight="60dp"
+        android:paddingBottom="24dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <!-- 海报：240×360dp 是 2:3，跟海报墙上的一致，观众不会觉得「变形了」 -->
+            <FrameLayout
+                android:layout_width="240dp"
+                android:layout_height="360dp"
+                android:background="@drawable/bg_card">
+
+                <TextView
+                    android:id="@+id/tv_poster_ph"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:textColor="@color/content_disabled"
+                    android:textSize="64sp" />
+
+                <ImageView
+                    android:id="@+id/img_poster"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:visibility="invisible" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="36dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tv_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:textColor="@color/content_primary"
+                    android:textSize="36sp"
+                    android:textStyle="bold" />
+
+                <!-- 「2026 · 剧集 · 45 分钟 · 已看 12:34」这类硬信息 -->
+                <TextView
+                    android:id="@+id/tv_meta"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textColor="@color/content_secondary"
+                    android:textSize="17sp" />
+
+                <!-- 类型标签 + 评分，没有就不占位（代码里 GONE） -->
+                <TextView
+                    android:id="@+id/tv_genres"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/content_accent"
+                    android:textSize="16sp"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/tv_overview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:ellipsize="end"
+                    android:lineSpacingExtra="7dp"
+                    android:maxLines="6"
+                    android:textColor="@color/content_primary"
+                    android:textSize="17sp" />
+
+                <!-- 技术信息（mkv / h264 / 1080p / 2.1 GB）。有就用一行说明白，
+                     也顺便把「简介下面是空的」这块地方填一下。 -->
+                <TextView
+                    android:id="@+id/tv_tech"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:textColor="@color/content_secondary"
+                    android:textSize="15sp"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="26dp"
+                    android:orientation="horizontal">
+
+                    <!-- 主按钮：焦点是暖色实心，跟弹窗里的按钮同一套（bg_dialog_btn） -->
+                    <TextView
+                        android:id="@+id/btn_play"
+                        android:layout_width="wrap_content"
+                        android:layout_height="52dp"
+                        android:background="@drawable/bg_dialog_btn"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:focusableInTouchMode="true"
+                        android:gravity="center"
+                        android:minWidth="180dp"
+                        android:paddingLeft="32dp"
+                        android:paddingRight="32dp"
+                        android:singleLine="true"
+                        android:text="@string/detail_play"
+                        android:textColor="@color/dialog_btn_text"
+                        android:textSize="19sp" />
+
+                    <TextView
+                        android:id="@+id/btn_back"
+                        android:layout_width="wrap_content"
+                        android:layout_height="52dp"
+                        android:layout_marginLeft="14dp"
+                        android:background="@drawable/bg_dialog_btn_secondary"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:focusableInTouchMode="true"
+                        android:gravity="center"
+                        android:minWidth="130dp"
+                        android:paddingLeft="28dp"
+                        android:paddingRight="28dp"
+                        android:singleLine="true"
+                        android:text="@string/detail_back"
+                        android:textColor="@color/dialog_btn_text_secondary"
+                        android:textSize="19sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 选集：电影没有这一段，代码里整块 GONE -->
+        <LinearLayout
+            android:id="@+id/page_episodes"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tv_episodes_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/detail_episodes"
+                android:textColor="@color/content_primary"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <!--
+                选集用 RecyclerView（横向），不套 HorizontalScrollView：
+                套一层的话 RecyclerView 拿不到「自己要滚」的主动权，
+                而且 40 集 × 每集一个 TextView 会一次性全部 inflate，
+                在 96MB 堆的电视上白白吃内存。RecyclerView 只建可见的那几个。
+            -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/row_episodes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:clipToPadding="false"
+                android:scrollbars="none" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- 加载提示：简介和剧集是两次独立请求，慢的时候得让用户知道在等 -->
+    <TextView
+        android:id="@+id/tv_loading"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="@string/detail_loading"
+        android:textColor="@color/content_secondary"
+        android:textSize="18sp"
+        android:visibility="gone" />
+</FrameLayout>

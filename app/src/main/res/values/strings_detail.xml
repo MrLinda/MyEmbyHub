@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="detail_play">播放</string>
+    <string name="detail_resume">继续播放 %1$s</string>
+    <string name="detail_play_episode">从第 %1$d 集开始</string>
+    <string name="detail_resume_episode">继续播放第 %1$d 集</string>
+    <string name="detail_episodes">选集</string>
+    <string name="detail_back">返回</string>
+    <string name="detail_loading">正在读取…</string>
+    <string name="detail_no_overview">（没有简介）</string>
+    <string name="detail_no_episode">没有可播放的剧集</string>
+    <string name="detail_episode_label">第 %1$d 集</string>
+    <string name="detail_failed">读取失败：%1$s</string>
+    <!-- 详情页信息行的分隔符，跟列表页保持一致 -->
+    <string name="detail_sep"> · </string>
+</resources>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    顶栏右侧「设置」按钮的底。
+
+    为什么不复用 bg_chip：那个是「更多 ›」这类**次要操作**的底（默认 surface_raised +
+    1dp stroke_subtle 的空心框），拿来当顶栏按钮，跟左边三个 tab 一比就像被禁用了 ——
+    实测在 1920×1080 上几乎是纯黑一块，用户根本看不出那是个按钮。
+    这里默认态抬到 surface_overlay，让它和 surface_base 的顶栏背景拉开一层灰，
+    但仍然比 tab 的焦点态（accent_container 暖色块）轻，视觉层级不乱。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/accent_container" />
+            <stroke android:width="1dp" android:color="@color/focus_border" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_pressed" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_overlay" />
+            <stroke android:width="1dp" android:color="@color/stroke_subtle" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

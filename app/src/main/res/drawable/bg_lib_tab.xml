@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    媒体库左栏 tab 的底。
+
+    焦点和选中分开画（电视上这两个是不同的事）：
+    - 焦点 = 遥控器在这儿 → 一层浮起来的底 + 细描边；
+    - 选中 = 右边海报墙是这个库 → 只有底色，没有描边（描边留给焦点）。
+    左侧那根暖色竖条由 item_lib_tab 里的 lib_tab_indicator 负责，不在这里画。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_overlay" />
+            <stroke android:width="2dp" android:color="@color/focus_border" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_pressed" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+</selector>

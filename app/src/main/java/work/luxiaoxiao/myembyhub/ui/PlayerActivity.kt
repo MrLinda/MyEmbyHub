@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
 import android.widget.TextView
 import work.luxiaoxiao.myembyhub.R
 import work.luxiaoxiao.myembyhub.net.EmbyApi
@@ -147,6 +148,7 @@ class PlayerActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_player)
+        hideSystemBars()
 
         playerView = findViewById(R.id.player_view)
         tvError = findViewById(R.id.tv_error)
@@ -583,6 +585,29 @@ class PlayerActivity : Activity() {
         player = null
         setResult(RESULT_OK)
         super.onDestroy()
+    }
+
+    /**
+     * 全屏。
+     *
+     * ⚠️ 4.3 上 `SYSTEM_UI_FLAG_IMMERSIVE_STICKY` 不可靠（它是 4.4 的），
+     * 只能靠这三面旗子 + 每次窗口重新拿到焦点时再收一次 —— 系统栏会偷偷回来。
+     */
+    private fun hideSystemBars() {
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LOW_PROFILE
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
     }
 
     companion object {

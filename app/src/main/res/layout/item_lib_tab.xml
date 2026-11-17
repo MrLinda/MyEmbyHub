@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    媒体库页左栏的一个库 tab。
+
+    为什么媒体库要左栏竖排、而不是跟首页一样横向一行：
+    首页是「一眼扫过去有什么」，横向叠行最合适；媒体库是「在一堆分类里反复挑」，
+    竖向列表能用余光看到上下五个分类，找回刚才那个库是往上一两下的事。
+    两者长得不一样，用户一眼就知道自己站在哪一页 —— 这是刻意做的区分，不是没统一。
+
+    尺寸跟老界面的 item_rail 对齐（56dp 行高 + 4dp 间隔），左内边距 18dp：
+    12 个库排下来 720dp 的屏刚好放下，不用滚。
+
+    「选中」和「焦点」是两个维度，可以同时出现：
+    - 选中 = 左侧 4dp 暖色竖条 + 标题变暖色 + 浅底；
+    - 焦点 = 遥控器在这儿 = 描边的一圈。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="56dp"
+    android:layout_marginBottom="4dp"
+    android:background="@drawable/bg_lib_tab"
+    android:clickable="true"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingLeft="14dp"
+    android:paddingRight="12dp">
+
+    <View
+        android:id="@+id/lib_tab_indicator"
+        android:layout_width="4dp"
+        android:layout_height="28dp"
+        android:layout_marginRight="12dp"
+        android:background="@color/indicator_bar"
+        android:visibility="invisible" />
+
+    <TextView
+        android:id="@+id/tv_lib_tab_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/lib_tab_text"
+        android:textSize="18sp" />
+
+</LinearLayout>

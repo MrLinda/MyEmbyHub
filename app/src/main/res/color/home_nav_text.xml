@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 顶部导航文字：焦点态 / 当前所在页都是暖色，其余是次级灰。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="@color/content_accent" />
+    <item android:state_selected="true" android:color="@color/content_accent" />
+    <item android:color="@color/content_secondary" />
+</selector>

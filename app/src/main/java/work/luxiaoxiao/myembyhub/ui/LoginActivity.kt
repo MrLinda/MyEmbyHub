@@ -175,7 +175,8 @@ class LoginActivity : Activity() {
     }
 
     private fun goLibrary() {
-        startActivity(Intent(this, LibraryActivity::class.java))
+        // 登录后进新的首页（顶部导航 + 横滑行）；老的列表视图还能从首页顶栏进
+        startActivity(Intent(this, HomeActivity::class.java))
         finish()
     }
 

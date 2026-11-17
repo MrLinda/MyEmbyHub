@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    顶部导航项：文字 + 下划线。
+
+    ⚠️ 下划线用 `invisible` 不用 `gone`：
+       `gone` 会让这一项的高度变化，焦点一路按过去文字会上下跳 3dp，像界面在抖。
+
+    ⚠️ 高度是 `home_nav_pill_height`（60dp），不是铺满顶栏的 76dp：
+       焦点底色（`bg_home_nav`）就是这块高度，铺满会顶天立地、跟内容区糊在一起。
+       顶栏 `nav_bar` 是 `gravity=center_vertical`，所以 60dp 的子项自动居中，
+       上下各剩 8dp —— 正好是 76dp 的 10% 出头，是「留白」而不是「没对齐」。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="@dimen/home_nav_pill_height"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:paddingLeft="18dp"
+    android:paddingRight="18dp"
+    android:background="@drawable/bg_home_nav"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:clickable="true">
+
+    <TextView
+        android:id="@+id/tv_nav_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="20sp"
+        android:textColor="@color/home_nav_text" />
+
+    <View
+        android:id="@+id/nav_underline"
+        android:layout_width="24dp"
+        android:layout_height="3dp"
+        android:layout_marginTop="4dp"
+        android:background="@color/indicator_bar"
+        android:visibility="invisible" />
+
+</LinearLayout>

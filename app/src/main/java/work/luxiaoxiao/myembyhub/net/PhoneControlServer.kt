@@ -44,8 +44,36 @@ class PhoneControlServer(
         /** 10 分钟后自动关闭，避免端口长期暴露。 */
         private const val MAX_LIFE_MS = 10 * 60 * 1000L
 
+        /**
+         * 手机端网页的配色。
+         *
+         * 为什么不用 Android 的 `@color` 资源：这个页面是在**手机浏览器**里渲染的，
+         * 拿不到 Android 资源。但角色名和电视端一一对应（bg/fg/muted/action…），
+         * 想统一改一套配色时，改这里 + `res/values/colors.xml` 两处即可。
+         *
+         * 规则：**本文件里除这个对象外不再出现 `#` 色值。**
+         */
+        private object WebPalette {
+            const val BG = "#0E1116"
+            const val FG = "#F2F5FA"
+            const val MUTED = "#98A2B3"
+            const val FIELD = "#181C24"
+            const val BORDER = "#262C38"
+            const val ACTION = "#3D7EFF"
+            const val ON_ACTION = "#FFFFFF"
+            const val ACTION_DISABLED = "#2A3A5C"
+            const val ON_ACTION_DISABLED = "#7A8AA8"
+            const val OK_BG = "#12351F"
+            const val OK_FG = "#7EE2A8"
+            const val OK_BORDER = "#1F6B3A"
+            const val ERR_BG = "#3A1A1A"
+            const val ERR_FG = "#FF9C9C"
+            const val ERR_BORDER = "#7A2B2B"
+            const val HINT = "#5D6A80"
+        }
+
         /** 手机端页面（内嵌 HTML，无外部依赖）。 */
-        private val PAGE_HTML = """
+        private val PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -53,23 +81,30 @@ class PhoneControlServer(
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>MyEmbyHub</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark;
+          --bg:{{bg}}; --fg:{{fg}}; --muted:{{muted}};
+          --field:{{field}}; --border:{{border}};
+          --action:{{action}}; --on-action:{{on_action}};
+          --action-disabled:{{action_disabled}}; --on-action-disabled:{{on_action_disabled}};
+          --ok-bg:{{ok_bg}}; --ok-fg:{{ok_fg}}; --ok-border:{{ok_border}};
+          --err-bg:{{err_bg}}; --err-fg:{{err_fg}}; --err-border:{{err_border}};
+          --hint:{{hint}}; }
   * { box-sizing: border-box; }
-  body { margin:0; padding:24px; background:#0E1116; color:#F2F5FA;
+  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
          font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
   h1 { font-size:22px; margin:8px 0 4px; }
-  .sub { color:#98A2B3; font-size:13px; margin-bottom:24px; }
-  label { display:block; font-size:13px; color:#98A2B3; margin:14px 0 6px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:24px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }
   input { width:100%; height:48px; padding:0 14px; font-size:16px;
-          background:#181C24; border:1px solid #262C38; border-radius:10px; color:#F2F5FA; }
-  input:focus { outline:none; border-color:#3D7EFF; }
+          background:var(--field); border:1px solid var(--border); border-radius:10px; color:var(--fg); }
+  input:focus { outline:none; border-color:var(--action); }
   button { width:100%; height:50px; margin-top:24px; font-size:17px; font-weight:600;
-           background:#3D7EFF; color:#fff; border:0; border-radius:10px; }
-  button:disabled { background:#2A3A5C; color:#7A8AA8; }
+           background:var(--action); color:var(--on-action); border:0; border-radius:10px; }
+  button:disabled { background:var(--action-disabled); color:var(--on-action-disabled); }
   #msg { margin-top:16px; padding:12px 14px; border-radius:10px; display:none; font-size:14px; }
-  .ok { display:block; background:#12351F; color:#7EE2A8; border:1px solid #1F6B3A; }
-  .err { display:block; background:#3A1A1A; color:#FF9C9C; border:1px solid #7A2B2B; }
-  .hint { margin-top:22px; font-size:12px; color:#5D6A80; line-height:1.7; }
+  .ok { display:block; background:var(--ok-bg); color:var(--ok-fg); border:1px solid var(--ok-border); }
+  .err { display:block; background:var(--err-bg); color:var(--err-fg); border:1px solid var(--err-border); }
+  .hint { margin-top:22px; font-size:12px; color:var(--hint); line-height:1.7; }
 </style>
 </head>
 <body>
@@ -150,6 +185,27 @@ function doSearch() {
 </body>
 </html>
 """.trimIndent()
+
+        /** 占位符填色后的页面；只拼一次。 */
+        private val PAGE_HTML: String by lazy {
+            PAGE_TEMPLATE
+                .replace("{{bg}}", WebPalette.BG)
+                .replace("{{fg}}", WebPalette.FG)
+                .replace("{{muted}}", WebPalette.MUTED)
+                .replace("{{field}}", WebPalette.FIELD)
+                .replace("{{border}}", WebPalette.BORDER)
+                .replace("{{action_disabled}}", WebPalette.ACTION_DISABLED)
+                .replace("{{on_action_disabled}}", WebPalette.ON_ACTION_DISABLED)
+                .replace("{{action}}", WebPalette.ACTION)
+                .replace("{{on_action}}", WebPalette.ON_ACTION)
+                .replace("{{ok_bg}}", WebPalette.OK_BG)
+                .replace("{{ok_fg}}", WebPalette.OK_FG)
+                .replace("{{ok_border}}", WebPalette.OK_BORDER)
+                .replace("{{err_bg}}", WebPalette.ERR_BG)
+                .replace("{{err_fg}}", WebPalette.ERR_FG)
+                .replace("{{err_border}}", WebPalette.ERR_BORDER)
+                .replace("{{hint}}", WebPalette.HINT)
+        }
     }
 
     private var socket: ServerSocket? = null

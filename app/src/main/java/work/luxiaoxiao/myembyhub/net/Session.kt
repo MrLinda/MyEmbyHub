@@ -44,12 +44,17 @@ class Session private constructor(private val sp: SharedPreferences) {
     /**
      * 在线更新的版本清单地址。
      *
-     * 默认指向家里电脑上的静态服务；换网络时可以在应用里改（存这里即可）。
+     * 默认指向 **GitHub Release 里的固定资产**（`releases/latest/download/version.json`），
+     * 换网络或想换镜像时可以在应用里改（存这里即可）。
+     * 清空则退回 [UpdateManager.DEFAULT_MANIFEST]。
      */
     var updateManifestUrl: String
-        get() = sp.getString(KEY_UPDATE_URL, DEFAULT_UPDATE_MANIFEST)
-            ?: DEFAULT_UPDATE_MANIFEST
+        get() = sp.getString(KEY_UPDATE_URL, "") ?: ""
         set(v) = sp.edit().putString(KEY_UPDATE_URL, v).apply()
+
+    /** 实际要请求的清单地址：用户填的优先，没填走打包时定下的默认值。 */
+    val updateManifest: String
+        get() = updateManifestUrl.ifEmpty { UpdateManager.DEFAULT_MANIFEST }
 
     val isLoggedIn: Boolean get() = token.isNotEmpty() && server.isNotEmpty()
 
@@ -66,8 +71,14 @@ class Session private constructor(private val sp: SharedPreferences) {
         private const val KEY_PASS = "password"
         private const val KEY_UPDATE_URL = "update_manifest_url"
 
-        /** 默认的版本清单地址（电脑上的静态服务）。 */
-        const val DEFAULT_UPDATE_MANIFEST = "http://192.168.1.50:8765/version.json"
+        /**
+         * 默认的版本清单地址（GitHub Release 固定资产）。
+         *
+         * 保留这个常量只是为了兼容旧引用；实际默认值在 [UpdateManager.DEFAULT_MANIFEST]，
+         * 由打包时的 `-PupdateRepo=owner/repo` 决定。
+         */
+        @Deprecated("改用 UpdateManager.DEFAULT_MANIFEST", ReplaceWith("UpdateManager.DEFAULT_MANIFEST"))
+        const val DEFAULT_UPDATE_MANIFEST = "https://github.com/OWNER/REPO/releases/latest/download/version.json"
 
         @Volatile
         private var instance: Session? = null

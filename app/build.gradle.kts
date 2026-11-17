@@ -7,6 +7,50 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+// ============================================================================
+// 在线更新的两个地址（必须先于 android{} 求值，defaultConfig 里要用）
+//
+// 换网络 / 换仓库时改这里，优先级：
+//   ① 命令行 -PupdateRepo=owner/repo、-PupdateHost=host:port
+//   ② 本机 local.properties 里的同名键（**已 gitignore**，真实地址不进仓库）
+//   ③ 下面的默认值（占位符）
+// ============================================================================
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val updateRepo = (project.findProperty("updateRepo") as String?)
+    ?: localProps.getProperty("updateRepo")
+    ?: ""
+val updateHost = (project.findProperty("updateHost") as String?)
+    ?: localProps.getProperty("updateHost")
+    ?: "192.168.1.50:8765"
+
+/**
+ * APK 的下载地址。
+ *
+ * `releases/latest/download/<资产名>` **不带 tag**，永远指向最新一个正式 Release
+ * 里的同名资产 → 这个地址跨版本是固定的，客户端和清单都不用改。
+ * 没有配仓库时退回本机静态服务，方便局域网调试。
+ */
+val apkDownloadUrl = if (updateRepo.isBlank()) {
+    "http://$updateHost/myembyhub-debug.apk"
+} else {
+    "https://github.com/$updateRepo/releases/latest/download/myembyhub-debug.apk"
+}
+
+/**
+ * 清单地址：配了仓库就走 GitHub Release 的固定资产地址，否则退回本机静态服务。
+ *
+ * 把整条 URL 烤进 BuildConfig，而不是在 Kotlin 里拼 ——
+ * 这样 `updateHost` 的来源（命令行 / local.properties / 默认值）只有 Gradle 一处逻辑。
+ */
+val manifestUrl = if (updateRepo.isBlank()) {
+    "http://$updateHost/version.json"
+} else {
+    "https://github.com/$updateRepo/releases/latest/download/version.json"
+}
+
 android {
     namespace = "work.luxiaoxiao.myembyhub"
     compileSdk {
@@ -20,6 +64,13 @@ android {
         // targetSdk 保持 23：API 24+ 在 4.3 系统上会引入未预期的行为变化
         targetSdk = 23
         multiDexEnabled = true
+
+        // GitHub 仓库（`owner/repo`），在线更新的主来源。
+        // 取值的优先级见文件末尾 updateRepo 那段；空串表示「不用 GitHub」，
+        // UpdateManager 会退回本机静态服务（局域网调试用）。
+        buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
+        // 版本清单的完整地址（同样烤进来，避免 Kotlin 侧再拼一遍）
+        buildConfigField("String", "UPDATE_MANIFEST", "\"$manifestUrl\"")
 
         // versionCode 用**秒级时间戳**：
         // ① 永远递增 → 覆盖安装不会被系统以「版本号相同」拒绝；
@@ -112,22 +163,12 @@ dependencies {
 //
 // 电视上的 App 请求这个文件，和自己的 versionCode 比较；
 // 大于就下载 APK 并调起系统安装器。
-// 电脑上用 `python -m http.server 8765` 把 dist/ 目录发出去即可。
 //
-// 换网络时改这里的 updateHost，优先级：
-//   ① 命令行 -PupdateHost=host:port
-//   ② 本机 local.properties 里的 updateHost=host:port（**local.properties 已 gitignore**，
-//      所以本机真实 IP 不会进仓库，仓库里只有占位符）
-//   ③ 下面的默认值（占位符）
+// 两个地址怎么来的见文件开头 updateRepo / updateHost 那段。
+// 发版流程：把 dist/myembyhub-debug.apk 和 dist/version.json **都**上传到
+// 同一个 GitHub Release（资产名不能改），客户端就能在线更新了。
+// 见 tools/publish-release.ps1。
 // ============================================================================
-val localProps = Properties().apply {
-    val f = rootProject.file("local.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
-}
-val updateHost = (project.findProperty("updateHost") as String?)
-    ?: localProps.getProperty("updateHost")
-    ?: "192.168.1.50:8765"
-
 tasks.matching { it.name == "assembleDebug" }.configureEach {
     doLast {
         val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
@@ -141,13 +182,13 @@ tasks.matching { it.name == "assembleDebug" }.configureEach {
             {
               "versionCode": $code,
               "versionName": "$name",
-              "url": "http://$updateHost/myembyhub-debug.apk",
+              "url": "$apkDownloadUrl",
               "size": ${apk.length()},
               "notes": "TV 客户端：扫码登录 / 搜索 / 排序 / 在线更新"
             }
             """.trimIndent()
         )
-        logger.lifecycle("已生成在线更新清单: ${out.absolutePath}")
+        logger.lifecycle("已生成在线更新清单: ${out.absolutePath}（下载地址 $apkDownloadUrl）")
     }
 }
 

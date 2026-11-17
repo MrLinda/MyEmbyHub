@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    卡片的焦点圈：**盖在海报上面**画的一圈描边。
+
+    为什么不直接把描边写在卡片背景里（bg_card 的 state_focused 确实已经写了）：
+    海报 ImageView 是 match_parent 全铺的，会把底下的背景整个盖住，
+    2dp 的暖色描边一个像素都看不见 —— 遥控器走到哪张卡上完全没提示。
+
+    所以焦点圈单独做一层，放在 item_home_poster 的最后（最后画的在最上面），
+    内部透明、只描边，海报照旧全铺，圈压在画面边缘上。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <stroke android:width="3dp" android:color="@color/focus_border" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+</selector>

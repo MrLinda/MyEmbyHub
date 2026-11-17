@@ -10,7 +10,7 @@
         android:id="@+id/img_qr"
         android:layout_width="280dp"
         android:layout_height="280dp"
-        android:background="@color/white"
+        android:background="@color/qrcode_backdrop"
         android:padding="6dp"
         android:contentDescription="二维码" />
 
