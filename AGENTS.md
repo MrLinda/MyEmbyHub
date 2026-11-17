@@ -69,6 +69,28 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 
 自签名证书同理，客户端必须显式信任。
 
+> ⚠️ **换一台服务器就连不上？先查它支不支持 CBC 套件**（2026-11-17 实测）：
+> Android 4.3 的 JSSE **只有 CBC 套件，没有 GCM/AEAD**。所以哪怕证书链完全正确，
+> 只要对端 nginx 只开 GCM（现代默认配置就这样），4.3 上永远是
+> `SSL handshake aborted`，客户端只能报一句「安全连接失败，检查服务器地址和网络」——
+> **看着像证书问题，其实是套件谈不拢**。
+>
+> 一分钟判定（在任意一台 Linux 上打，不要在本机打，本机 Clash 会劫持 DNS）：
+> ```bash
+> # 4.3 能用得上的那类套件；回 "New, ... Cipher is ..." 就是支持
+> echo | openssl s_client -tls1_2 -cipher 'ECDHE-ECDSA-AES128-SHA' \
+>   -connect <服务器>:<端口> -servername <域名> 2>&1 | grep -E '^New,|alert'
+> ```
+> 实测对照：老服务器 `tv.example.com:443` → `New, TLSv1.0, Cipher is ECDHE-ECDSA-AES128-SHA`（能登）；
+> 新服务器 `<新服务器>:<端口>` → `alert handshake failure`（登不上）。
+>
+> 修法在服务端，把 CBC 加回 `ssl_ciphers`：
+> ```nginx
+> ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA;
+> ssl_prefer_server_ciphers on;
+> ```
+> 客户端救不回来 —— 4.3 的 JSSE 里根本没有 GCM 实现，除非整包换 Conscrypt。
+
 ---
 
 ## 3. 模块结构
