@@ -96,7 +96,8 @@ class LoginActivity : Activity() {
                     saveSession(api.server, token, user, pass, api.userId)
                     goLibrary()
                 }.onFailure { e ->
-                    tvStatus.text = getString(R.string.login_failed) + "：" + work.luxiaoxiao.myembyhub.net.friendlyError(e)
+                    tvStatus.text = getString(R.string.login_failed) + "：" +
+                        work.luxiaoxiao.myembyhub.net.friendlyLoginError(e)
                 }
             }
         }

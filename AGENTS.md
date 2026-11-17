@@ -422,6 +422,22 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   （真机表现：扫码弹窗一按「关闭」App 就闪退，logcat 里是
   `FATAL EXCEPTION: pool-3-thread-2 / java.lang.Error: java.lang.InterruptedException`）。
   → 解法：sleep 外面 `catch (e: InterruptedException)`，安静退出线程。
+- ⚠️ **给手机页面回 JSON 时不能手拼字符串**（2026-11-17 实测）：
+  `PhoneControlServer` 原来是 `"{\"ok\":false,\"message\":\"$msg\"}"` 这么拼的，
+  只把 `"` 换成 `'`，**没管换行**。而报错文本里常常带换行 ——
+  网关层的 502/504 回的是多行 HTML 错误页，`EmbyApi.readError()` 会把响应体
+  前 200 字符原样带出来 → 拼出来的 JSON 里有**裸 `\n`**
+  → 手机浏览器 `r.json()` 抛
+  `SyntaxError: Bad control character in string literal in JSON at position 146`，
+  用户看到的是一句 JS 报错，而不是「服务器暂时不可用」。
+  → 解法：一律走 `org.json.JSONObject`（`jsonMessage()` / `jsonState()` 两个 helper），
+  顺手把连续空白压成一个空格。
+- ⚠️ **登录页的错误文案不能复用 `friendlyError()`**：
+  它把任何带 `401` 的消息都翻成「登录已过期，请重新登录」——
+  那是**已登录用户** token 失效时说的话。可密码打错时服务端回的也是 401
+  （`登录失败 HTTP 401 无效用户名或密码。请重试。`），
+  于是用户在登录页上看到「登录已过期」，会以为是自己网络坏了，反复重试。
+  → 解法：登录路径用 `friendlyLoginError(e)`（401 → 「账号或密码不对」，其余转交 `friendlyError`）。
 
 ## 7. 工程构建坑位（AGP 9.5 / Gradle 9.6）
 

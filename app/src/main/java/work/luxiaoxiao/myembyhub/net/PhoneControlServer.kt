@@ -41,6 +41,8 @@ class PhoneControlServer(
         const val PORT = 5103
         const val MODE_LOGIN = "login"
         const val MODE_SEARCH = "search"
+        /** JSON 响应的 Content-Type（带 charset，手机端按 UTF-8 解）。 */
+        private const val JSON_TYPE = "application/json; charset=utf-8"
         /** 10 分钟后自动关闭，避免端口长期暴露。 */
         private const val MAX_LIFE_MS = 10 * 60 * 1000L
 
@@ -306,7 +308,7 @@ function doSearch() {
                 }
                 method == "GET" && path == "/api/state" -> {
                     val state = if (busy.get()) "working" else "waiting"
-                    respond(out, 200, "application/json; charset=utf-8", "{\"state\":\"$state\",\"mode\":\"$mode\"}")
+                    respond(out, 200, JSON_TYPE, jsonState(state))
                 }
                 method == "POST" && path == "/api/login" -> {
                     handleLogin(body, out)
@@ -333,7 +335,7 @@ function doSearch() {
             val user = json.optString("username").trim()
             val pass = json.optString("password")
             if (user.isEmpty()) {
-                respond(out, 400, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"请填写用户名\"}")
+                respond(out, 400, JSON_TYPE, jsonMessage(false, "请填写用户名"))
                 return
             }
 
@@ -343,15 +345,17 @@ function doSearch() {
             val result = api.login(user, pass)
             result.onSuccess { token ->
                 onLogin(api.server, token, user, api.userId)
-                respond(out, 200, "application/json; charset=utf-8", "{\"ok\":true,\"message\":\"登录成功，电视端已接收\"}")
+                respond(out, 200, JSON_TYPE, jsonMessage(true, "登录成功，电视端已接收"))
             }.onFailure { e ->
-                val msg = (e.message ?: e.javaClass.simpleName).replace("\"", "'")
+                // 用 friendlyLoginError 而不是 e.message：报错里常常带一坨
+                // HTML / JSON 响应体（网关层的 502 页面就是多行 HTML），
+                // 原样丢给手机页面既看不懂，还可能把 JSON 撑坏。
+                val msg = friendlyLoginError(e)
                 onFail(msg)
-                respond(out, 401, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"$msg\"}")
+                respond(out, 401, JSON_TYPE, jsonMessage(false, msg))
             }
         } catch (e: Throwable) {
-            val msg = "解析请求失败：${e.message ?: e.javaClass.simpleName}"
-            respond(out, 400, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"$msg\"}")
+            respond(out, 400, JSON_TYPE, jsonMessage(false, "解析请求失败：${e.message ?: e.javaClass.simpleName}"))
         } finally {
             busy.set(false)
         }
@@ -361,16 +365,36 @@ function doSearch() {
         try {
             val term = org.json.JSONObject(body).optString("term").trim()
             if (term.isEmpty()) {
-                respond(out, 400, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"请输入关键词\"}")
+                respond(out, 400, JSON_TYPE, jsonMessage(false, "请输入关键词"))
                 return
             }
             onSearch(term)
-            respond(out, 200, "application/json; charset=utf-8", "{\"ok\":true,\"message\":\"已发送到电视\"}")
+            respond(out, 200, JSON_TYPE, jsonMessage(true, "已发送到电视"))
         } catch (e: Throwable) {
-            val msg = "解析请求失败：${e.message ?: e.javaClass.simpleName}"
-            respond(out, 400, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"$msg\"}")
+            respond(out, 400, JSON_TYPE, jsonMessage(false, "解析请求失败：${e.message ?: e.javaClass.simpleName}"))
         }
     }
+
+    /**
+     * 拼一条 `{"ok":…,"message":…}` 响应。
+     *
+     * ⚠️ **必须走 [org.json.JSONObject]，不能手工拼字符串**（2026-11-17 实测踩过）：
+     * 报错文本里常常带**换行**（网关层 502 回的是多行 HTML 错误页，
+     * `EmbyApi.readError` 会把响应体前 200 字符原样带出来）。
+     * 手拼出来的 JSON 里就是裸的 `\n` / `\r` —— 手机浏览器 `r.json()` 直接抛
+     * `SyntaxError: Bad control character in string literal in JSON`，
+     * 用户看到的是一句 JS 报错，而不是「服务器暂时不可用」。
+     *
+     * 顺带把连续空白压成一个空格，免得手机页面上出现一大段换行。
+     */
+    private fun jsonMessage(ok: Boolean, message: String): String =
+        org.json.JSONObject()
+            .put("ok", ok)
+            .put("message", message.replace(Regex("\\s+"), " ").trim())
+            .toString()
+
+    private fun jsonState(state: String): String =
+        org.json.JSONObject().put("state", state).put("mode", mode).toString()
 
     private fun respond(out: OutputStream, code: Int, contentType: String, body: String) {
         val bytes = body.toByteArray(Charsets.UTF_8)

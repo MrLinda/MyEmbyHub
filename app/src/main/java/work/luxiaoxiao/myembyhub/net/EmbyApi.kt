@@ -583,6 +583,27 @@ fun friendlyError(e: Throwable): String {
 }
 
 /**
+ * 登录失败该说什么。
+ *
+ * ⚠️ **不能直接拿 [friendlyError] 用在登录页上**（2026-11-17 实测踩到）：
+ * 它把任何带 `401` 的消息都翻成「登录已过期，请重新登录」—— 那是**已登录用户**
+ * token 失效时说的话。可密码打错时服务端回的也是 401
+ * （`登录失败 HTTP 401 无效用户名或密码。请重试。`），
+ * 于是用户在登录页上看到「登录已过期，请重新登录」，完全对不上，
+ * 会以为是自己网络或服务器的问题，反复重试。
+ *
+ * 其余情况（超时、DNS、TLS、网关 5xx）仍然交给 [friendlyError]。
+ */
+fun friendlyLoginError(e: Throwable): String {
+    val msg = e.message ?: ""
+    return when {
+        msg.contains("No authentication challenges", ignoreCase = true) ||
+            msg.contains("HTTP 401") -> "账号或密码不对（服务端拒绝了这次登录）"
+        else -> friendlyError(e)
+    }
+}
+
+/**
  * 老版本遗留的固定用户 id。
  *
  * ⚠️ **不要再用它**：它是个假 id，`/Users/{id}/Items/Resume` 会返回 0 条，
