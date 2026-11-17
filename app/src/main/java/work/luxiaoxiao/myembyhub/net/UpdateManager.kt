@@ -17,9 +17,9 @@ import work.luxiaoxiao.myembyhub.BuildConfig
  *
  * 1. 取版本清单 `version.json`（每次发版的 Release 里固定有一个同名资产）：
  *    ```json
- *    { "versionCode": 1794903737, "versionName": "1.0.20261117-162217",
+ *    { "versionCode": 1794918005, "versionName": "1.0.20261117.2",
  *      "url": "https://github.com/OWNER/REPO/releases/latest/download/myembyhub.apk",
- *      "size": 2165418, "notes": "修复扫码登录" }
+ *      "size": 2174365, "notes": "修复扫码登录" }
  *    ```
  * 2. `versionCode` 比当前 App 大 → 有新版
  * 3. 下载 APK 到 `/sdcard/Download/`

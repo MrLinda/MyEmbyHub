@@ -8,9 +8,10 @@ TLS 默认只开 1.0，证书链还认不得 Let's Encrypt 2024 的新根——�
 
 这个仓库就是那份手搓笔记 + 能跑的代码。
 
-**最新版本**：[`v1.0.20261117`](https://github.com/MrLinda/MyEmbyHub/releases/latest) ——
+**最新版本**：[`v1.0.20261117.1`](https://github.com/MrLinda/MyEmbyHub/releases/latest) ——
 电视上装一次带「在线更新」的版本，之后直接在电视里升级（走 GitHub Release，
-自动尝试国内镜像前缀）。
+自动尝试国内镜像前缀）。版本号形如 `1.0.20261117.2`，末位是「当天第几个版本」，
+一天推几版不会撞号。
 
 | 首页（顶栏 + 纵向横滑行） | 媒体库（左栏分类 + 海报墙） |
 |---|---|
@@ -180,14 +181,15 @@ python tools/serve-range.py 8765 dist
 ```
 
 ```json
-{ "versionCode": 1794913365, "versionName": "1.0.20261117-190245",
-  "url": "http://192.168.1.50:8765/myembyhub-debug.apk", "size": 2174520, "notes": "…" }
+{ "versionCode": 1794918005, "versionName": "1.0.20261117.2",
+  "url": "http://192.168.1.50:8765/myembyhub-debug.apk", "size": 2174365, "notes": "…" }
 ```
 
 正式发布走 GitHub Release（本仓库已经这么用了）：
 
 ```bash
-pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Tag v1.0 -Notes "改了什么"
+# tag 不用写，脚本按 v + versionName 自己拼（v1.0.20261117.3）
+pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Notes "改了什么"
 ```
 
 客户端取的是 `https://github.com/MrLinda/MyEmbyHub/releases/latest/download/version.json`

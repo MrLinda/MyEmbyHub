@@ -92,7 +92,8 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 
 > **在线更新走 GitHub Release**（主源）+ 国内镜像前缀加速，细节见
 > [docs/online-update.md](docs/online-update.md)。发版：
-> `pwsh tools/publish-release.ps1 -Repo <owner>/<repo> -Tag v1.0.xxx`。
+> `pwsh tools/publish-release.ps1 -Repo <owner>/<repo> -Notes "改了什么"`。
+> `-Tag` 一般不用写：脚本用 `v` + `versionName`，也就是 `v1.0.20261117.3`。
 > 打包时用 `local.properties` 里的 `updateRepo=<owner>/<repo>` 决定清单里的下载地址；
 > 不填则退回 `updateHost` 指向的局域网静态服务（只用于调试，别发 Release）。
 
@@ -394,7 +395,8 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
 - `kotlin { compilerOptions { jvmTarget } }` 扩展由 AGP 注册。
 - Kotlin DSL 里 `java.xxx` 会被 Gradle 的 java 扩展抢占，JDK 类要用文件头 `import`。
 - 版本号：`versionCode` 用秒级时间戳（永远递增，可覆盖安装），`versionName` 形如
-  `1.0.20261102-230013`。
+  `1.0.20261117.3`（末位 = 当天第几次打包，由根目录 `.version-seq` 记着，已 gitignore；
+  只有跑 `assemble*` 时才自增，跑单测不吃号）。发版 tag 就是 `v` + `versionName`。
 
 ---
 

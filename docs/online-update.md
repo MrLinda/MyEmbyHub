@@ -34,15 +34,21 @@ version.json            ← 版本清单
 
 ```json
 {
-  "versionCode": 1794910613,
-  "versionName": "1.0.20261117-181653",
+  "versionCode": 1794918005,
+  "versionName": "1.0.20261117.2",
   "url": "https://github.com/<owner>/<repo>/releases/latest/download/myembyhub-debug.apk",
-  "size": 2172643,
+  "size": 2174365,
   "notes": "TV 客户端：扫码登录 / 搜索 / 排序 / 在线更新"
 }
 ```
 
 `versionCode` 是**秒级时间戳**，永远递增 → 不会被系统以「版本号相同」拒绝覆盖安装。
+
+`versionName` 是 `1.0.yyyyMMdd.N`，`N` 是**当天第几次打包**，从 1 起。
+一天给电视推好几个版本是常态（改个焦点、调个间距都值得装一次看），
+只写到日期就没法区分了。序号记在仓库根目录的 `.version-seq`（已 gitignore，
+格式 `20261117=2`），只有真正跑 `assemble*` 时才自增 —— 跑单元测试、IDE 同步不吃号。
+换台机器编号会从头开始，无所谓：决定「谁更新」的是 `versionCode`，`versionName` 只给人看。
 
 ---
 
@@ -158,12 +164,16 @@ echo "updateRepo=MrLinda/MyEmbyHub" >> local.properties
 
 ```bash
 set JAVA_HOME=E:\Programs\Android\Android Studio\jbr
-gradlew :app:assembleDebug                       # 生成 dist/version.json
-pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Tag v1.0.20261117 -Notes "修复扫码登录"
+gradlew :app:assembleDebug                       # 生成 dist/version.json，版本号自增
+pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Notes "修复扫码登录"
 ```
 
+`-Tag` 不用写：脚本直接用 `v` + `versionName`，也就是 `v1.0.20261117.3` 这种。
+两者一一对应，不会出现「Release 叫 A、装上去的包叫 B」。
+
 脚本会：同步 APK 到 `dist/` → 检查清单里的地址是不是还是内网 → 校验清单与 APK 的
-`versionCode` 一致 → `gh release create` 上传两个资产。
+`versionCode` 一致 → 用推导出的 tag 调 `gh release create` 上传两个资产。
+tag 已经存在说明这个包发过了，脚本直接报错（重发请先删旧 Release 或用 `-Tag` 另起名）。
 
 > ⚠️ **只判「`dist/` 里有没有 APK」是不够的**：里面留着上一次的包、清单却是这次生成的，
 > 传上去就是「装完还提示有新版」。所以脚本会比对
@@ -177,7 +187,7 @@ pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Tag v1.0.20261117 -Notes
 ### 本仓库的实际状态（2026-11-17）
 
 - 仓库：<https://github.com/MrLinda/MyEmbyHub>（public）
-- 已发布：`v1.0.20261117`，资产 `myembyhub-debug.apk` + `version.json`
+- 已发布：`v1.0.20261117.1`，资产 `myembyhub-debug.apk` + `version.json`
 - 客户端取清单的实际地址：
   <https://github.com/MrLinda/MyEmbyHub/releases/latest/download/version.json>
 - 本机 `local.properties` 里已写 `updateRepo=MrLinda/MyEmbyHub`，

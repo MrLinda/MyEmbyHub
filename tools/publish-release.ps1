@@ -1,7 +1,13 @@
 # ============================================================================
 # 发布一个 GitHub Release，并把在线更新需要的两个资产上传上去。
 #
-#   pwsh tools/publish-release.ps1 -Repo owner/repo -Tag v1.0.20261117 -Notes "修复扫码登录"
+#   pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Notes "修复扫码登录"
+#   pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Tag v1.0.20261117.3
+#
+# tag 不传就用 `v` + versionName（`v1.0.20261117.2`）。
+# versionName 本身是 `1.0.yyyyMMdd.N`，N = 当天第几次打包（由 app/build.gradle.kts 管，
+# 序号存在根目录 .version-seq 里）—— 一天推好几个版本时，第二个不会没名字可用。
+# tag 和 versionName 一一对应；撞名说明这个包已经发过，脚本会直接报错。
 #
 # 上传的资产必须**同名**（客户端写死的就是这两个名字）：
 #   myembyhub-debug.apk    ← dist/ 里的包
@@ -10,6 +16,7 @@
 # 客户端取的是
 #   https://github.com/<repo>/releases/latest/download/version.json
 # 这个地址不带 tag，永远指向「最新一个正式 Release」，所以发新版只要重跑本脚本。
+# 换句话说：**tag 怎么命名都不影响客户端**，改名/改序号不需要重新打包。
 #
 # ⚠️ 先决条件
 #   ① 装 GitHub CLI（gh）并 `gh auth login`
@@ -18,7 +25,8 @@
 # ============================================================================
 param(
     [Parameter(Mandatory = $true)][string]$Repo,
-    [Parameter(Mandatory = $true)][string]$Tag,
+    # 不传就按 v<major.minor.yyyyMMdd>.<当天序号> 自动推导
+    [string]$Tag = "",
     [string]$Notes = "",
     [string]$Title = "",
     # Release 默认设为正式版（不是 draft / prerelease）：
@@ -88,6 +96,34 @@ if ($aapt) {
     }
 } else {
     Write-Warning "找不到 aapt.exe（ANDROID_HOME=$sdkRoot），跳过清单/APK 一致性校验"
+}
+
+# ── tag 命名：v<major.minor.yyyyMMdd>.<当天序号> ──────────────────────────
+# 一天可能给电视推好几个版本，tag 只写到日期就会撞名。
+# 序号以**远端**已有的 Release 为准：gh release create 是直接在远端建 tag 的，
+# 本地仓库里一个 tag 都没有（除非你 fetch 过）。
+if (-not $Tag) {
+    # versionName 现在是 `1.0.yyyyMMdd.N`，tag 就是 `v` + versionName —— 一一对应，
+    # 不用再查远端算序号（序号在打包时就定了，.version-seq 管着）。
+    if ([string]$json.versionName -notmatch '^1\.0\.\d{8}\.\d+$') {
+        throw "versionName 格式不认识：$($json.versionName)（期望 1.0.yyyyMMdd.N），请手动指定 -Tag"
+    }
+    $Tag = "v$($json.versionName)"
+
+    # 撞名说明这个包已经发过了（重复跑脚本），直接报错比覆盖更安全
+    $exists = $false
+    try {
+        & gh api "repos/$Repo/releases/tags/$Tag" 2>$null | Out-Null
+        $exists = ($LASTEXITCODE -eq 0)
+    }
+    catch { $exists = $false }
+    if ($exists) {
+        throw "$Tag 已经存在（这个版本发过了）。要重发就先删掉旧 Release，或用 -Tag 指定别的名字。"
+    }
+    Write-Host "  tag     : $Tag（由 versionName 推导）"
+}
+elseif ($Tag -notmatch '^v\d+\.\d+\.\d{8}\.\d+$') {
+    Write-Warning "tag 不符合约定格式（v1.0.20261117.1）：$Tag"
 }
 
 Write-Host "发布 $Tag"

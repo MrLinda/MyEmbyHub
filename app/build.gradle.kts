@@ -51,6 +51,29 @@ val manifestUrl = if (updateRepo.isBlank()) {
     "https://github.com/$updateRepo/releases/latest/download/version.json"
 }
 
+// ============================================================================
+// 版本号：`1.0.yyyyMMdd.N`
+//
+// N 是**当天第几次打包**，从 1 起。一天要给电视推好几个版本是常态
+// （改个焦点、调个间距都值得装一次看），只写到日期就没法区分了。
+//
+// 序号存在根目录的 `.version-seq`（已 gitignore），格式 `20261117=3`。
+// 换台机器编号会从头开始 —— 无所谓，真正决定「谁更新」的是 versionCode（秒级时间戳），
+// versionName 只是给人看的。发版脚本也拿它当 tag：`v` + versionName。
+//
+// ⚠️ 只有真的在打包时才推进序号：跑单元测试、IDE 同步都不该把当天的号吃掉。
+// ============================================================================
+val buildStamp = System.currentTimeMillis()
+val versionDate = SimpleDateFormat("yyyyMMdd").format(Date(buildStamp))
+val packaging = gradle.startParameter.taskNames.any { it.contains("assemble", ignoreCase = true) }
+val seqFile = rootProject.file(".version-seq")
+val seqPrev = (if (seqFile.exists()) seqFile.readText().trim() else "")
+    .split("=")
+    .let { if (it.size == 2 && it[0] == versionDate) it[1].toIntOrNull() ?: 0 else 0 }
+val versionSeq = if (packaging) (seqPrev + 1).coerceAtLeast(1) else seqPrev.coerceAtLeast(1)
+if (packaging) seqFile.writeText("$versionDate=$versionSeq")
+val versionFull = "1.0.$versionDate.$versionSeq"
+
 android {
     namespace = "work.luxiaoxiao.myembyhub"
     compileSdk {
@@ -75,9 +98,11 @@ android {
         // versionCode 用**秒级时间戳**：
         // ① 永远递增 → 覆盖安装不会被系统以「版本号相同」拒绝；
         // ② 和在线更新清单里的 versionCode 直接可比，不用维护手工版本表。
-        val stamp = System.currentTimeMillis()
-        versionCode = (stamp / 1000L).toInt()
-        versionName = "1.0.${SimpleDateFormat("yyyyMMdd-HHmmss").format(Date(stamp))}"
+        //
+        // versionName 是给人看的 `1.0.yyyyMMdd.N`（N = 当天第几次打包），
+        // 见文件开头 buildStamp / versionSeq 那段。
+        versionCode = (buildStamp / 1000L).toInt()
+        versionName = versionFull
     }
 
     buildTypes {

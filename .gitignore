@@ -53,3 +53,5 @@ captures/
 .externalNativeBuild/
 # 提交时临时写的提交说明文件
 /_msg.txt
+# 当天第几次打包的计数器（换机器就从头数，没必要进仓库）
+/.version-seq

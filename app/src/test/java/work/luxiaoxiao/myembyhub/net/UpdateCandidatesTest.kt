@@ -60,7 +60,7 @@ class UpdateCandidatesTest {
     fun release_isNewerThanComparesStrictly() {
         val r = UpdateManager.Release(
             versionCode = 1794903737L,
-            versionName = "1.0.20261117-162217",
+            versionName = "1.0.20261117.2",
             url = "https://example.com/a.apk",
             size = 100,
             notes = ""
