@@ -150,6 +150,23 @@ adb pull /data/local/tmp/w.xml dist/
 > 解析 bounds 要用 `[regex]::Match($a.bounds,'\[(\d+),')`，
 > 用 `-replace '\D',' '` split 取 index 0 会拿到空串导致误判。
 >
+> ⚠️ **`uiautomator dump` 会被 OOM Killer 干掉**（2026-11-17 实测）：电视内存吃紧时
+> 它起不来，`adb shell "uiautomator dump /data/local/tmp/w.xml 2>&1"` 只回一个字 `Killed`，
+> 文件根本不生成，`adb pull` 报 `remote object ... does not exist`。
+> → 看着像「命令写错了 / 路径不对」，其实是内存不够，**别去改路径、别去建目录**。
+> → 先 `adb shell "ps | grep myembyhub"` 看进程在不在，再决定要不要放弃 dump 改成人工看。
+>
+> ⚠️ **壳里没有 `tail` / `grep` / `head`**（这台 ROM 的 toybox 裁得很狠）：
+> `adb shell "df /sdcard | tail -2"` 报 `tail: not found`；
+> `pm list packages | grep xxx` 静默返回空（看起来像「没装」，其实是 grep 不存在）。
+> → 过滤一律在**本机 PowerShell 里做**（`& $adb shell "pm list packages" | Select-String xxx`）。
+>
+> ⚠️ **`am start` 必须带 `--user 0`**：不带会报
+> `SecurityException: startActivity asks to run as user -2 but is calling from user 0`。
+> **`am force-stop` 直接没权限**：`Permission Denial: forceStopPackage() ... requires
+> android.permission.FORCE_STOP_PACKAGES` → 想重启 App 只能靠人按遥控器退出，
+> 或者 `am start` 到另一个 Activity 顶掉。
+>
 > ⚠️ `adb shell input keyevent` **无法操作别的应用的窗口**：
 > `input` 是从 shell 进程（uid 2000）注入，目标是别的 uid（如系统安装器 uid 10014）时会报
 > `SecurityException: Injecting to another application requires INJECT_EVENTS permission`。
@@ -192,8 +209,13 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
 - `SSLSocket.getProtocol()` / `getCipherSuite()` / `SSLSocketFactory.getSupportedProtocols()`
   在公开 SDK stub 里是 `@hide`，编译期引用不到 → **只能反射**。
 - `screencap` 在这台 ROM 上输出 0 字节（截图不可用）。
-- `dumpsys activity` / `dumpsys window` 需要 DUMP 权限，shell 没有 →
+- `dumpsys activity` / `dumpsys window` / **`dumpsys package`** 都需要 DUMP 权限，shell 没有
+  （`Permission Denial: can't dump ActivityManager ... without permission android.permission.DUMP`）→
   判断状态用 `pm path`、`ls -l /data/app/...`、`ps`、`logcat`。
+- **`run-as` 在这台 ROM 上是坏的**：`run-as <包名> ...` 一律回
+  `run-as: Package '<包名>' is unknown`，哪怕 `pm path` 能查出包、`/data/data/<包名>` 也在。
+  → 想看 App 的 SharedPreferences / 内部文件（比如确认有没有登录态），这条路走不通，
+  只能让 App 自己把状态显示在界面上，或者靠服务端/日志推断。
 - **`adb shell input keyevent` 无法操作别的应用的窗口**：`input` 是从 shell 进程（uid 2000）注入，
   目标是别的 uid（如系统安装器 uid 10014）时会报
   `SecurityException: Injecting to another application requires INJECT_EVENTS permission`。
