@@ -8,6 +8,10 @@ TLS 默认只开 1.0，证书链还认不得 Let's Encrypt 2024 的新根——�
 
 这个仓库就是那份手搓笔记 + 能跑的代码。
 
+**最新版本**：[`v1.0.20261117`](https://github.com/MrLinda/MyEmbyHub/releases/latest) ——
+电视上装一次带「在线更新」的版本，之后直接在电视里升级（走 GitHub Release，
+自动尝试国内镜像前缀）。
+
 | 首页（顶栏 + 纵向横滑行） | 媒体库（左栏分类 + 海报墙） |
 |---|---|
 | ![首页](docs/images/home.jpg) | ![媒体库](docs/images/library.jpg) |
@@ -180,12 +184,14 @@ python tools/serve-range.py 8765 dist
   "url": "http://192.168.1.50:8765/myembyhub-debug.apk", "size": 2174520, "notes": "…" }
 ```
 
-正式发布走 GitHub Release：
+正式发布走 GitHub Release（本仓库已经这么用了）：
 
 ```bash
-pwsh tools/publish-release.ps1 -Repo owner/repo -Tag v1.0 -Notes "改了什么"
+pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Tag v1.0 -Notes "改了什么"
 ```
 
+客户端取的是 `https://github.com/MrLinda/MyEmbyHub/releases/latest/download/version.json`
+（`latest` 不带 tag，永远指向最新一个正式 Release），APK 同理。
 脚本会校验「清单里的 versionCode」和「APK 里的 versionCode」一致再上传——
 不一致直接中止，避免出现「装完还提示有新版本」的死循环。
 细节见 [`docs/online-update.md`](docs/online-update.md)。

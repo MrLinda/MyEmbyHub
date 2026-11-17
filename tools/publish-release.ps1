@@ -40,6 +40,19 @@ if (-not (Test-Path $apk)) {
     Copy-Item $built $apk -Force
     Write-Host "已把构建产物同步到 $apk"
 }
+else {
+    # dist/ 里已经有一个旧包时**必须比时间**：只判「存在」会把上一次的包传上去，
+    # 而清单是这次生成的 → 电视装完还提示有新版（就是下面一致性校验拦的那种）。
+    $built = Join-Path $root 'app\build\outputs\apk\debug\app-debug.apk'
+    if (Test-Path $built) {
+        $b = (Get-Item $built).LastWriteTime
+        $d = (Get-Item $apk).LastWriteTime
+        if ($b -gt $d) {
+            Copy-Item $built $apk -Force
+            Write-Host "构建产物比 dist/ 里的新，已覆盖同步"
+        }
+    }
+}
 if (-not (Test-Path $manifest)) { throw "找不到清单：$manifest，先跑 gradlew :app:assembleDebug" }
 
 # 发版前最后一道检查：清单里的下载地址必须是公网地址

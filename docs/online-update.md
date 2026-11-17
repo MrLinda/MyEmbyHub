@@ -151,7 +151,7 @@ https://github.com/.../version.json                 ← 直连兜底
 gh auth login
 
 # ③ 让打包时知道仓库地址：local.properties（已 gitignore）
-echo "updateRepo=<owner>/<repo>" >> local.properties
+echo "updateRepo=MrLinda/MyEmbyHub" >> local.properties
 ```
 
 之后每次发版：
@@ -159,14 +159,33 @@ echo "updateRepo=<owner>/<repo>" >> local.properties
 ```bash
 set JAVA_HOME=E:\Programs\Android\Android Studio\jbr
 gradlew :app:assembleDebug                       # 生成 dist/version.json
-pwsh tools/publish-release.ps1 -Repo <owner>/<repo> -Tag v1.0.20261117 -Notes "修复扫码登录"
+pwsh tools/publish-release.ps1 -Repo MrLinda/MyEmbyHub -Tag v1.0.20261117 -Notes "修复扫码登录"
 ```
 
-脚本会：同步 APK 到 `dist/` → 检查清单里的地址是不是还是内网 → `gh release create` 上传两个资产。
+脚本会：同步 APK 到 `dist/` → 检查清单里的地址是不是还是内网 → 校验清单与 APK 的
+`versionCode` 一致 → `gh release create` 上传两个资产。
+
+> ⚠️ **只判「`dist/` 里有没有 APK」是不够的**：里面留着上一次的包、清单却是这次生成的，
+> 传上去就是「装完还提示有新版」。所以脚本会比对
+> `app/build/outputs/apk/debug/app-debug.apk` 与 `dist/myembyhub-debug.apk` 的修改时间，
+> 构建产物更新就覆盖同步。
 
 ⚠️ 打包时没给 `updateRepo`，`version.json` 里的 `url` 会是
 `http://<updateHost>/myembyhub-debug.apk`（局域网调试用）—— 这种包**别发 Release**，
 电视在别的网络下下载会失败。脚本会对此 `Write-Warning`。
+
+### 本仓库的实际状态（2026-11-17）
+
+- 仓库：<https://github.com/MrLinda/MyEmbyHub>（public）
+- 已发布：`v1.0.20261117`，资产 `myembyhub-debug.apk` + `version.json`
+- 客户端取清单的实际地址：
+  <https://github.com/MrLinda/MyEmbyHub/releases/latest/download/version.json>
+- 本机 `local.properties` 里已写 `updateRepo=MrLinda/MyEmbyHub`，
+  以后直接 `gradlew :app:assembleDebug` 生成的就是公网地址。
+
+> 本机 curl 有个坑：不带 `--ssl-no-revoke` 会报
+> `schannel: ... CRYPT_E_NO_REVOCATION_CHECK`（本机证书栈查不了吊销列表），
+> 那不是仓库的问题。验证下载链路时加上这个参数即可。
 
 ---
 
