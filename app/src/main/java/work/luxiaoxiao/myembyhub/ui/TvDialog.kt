@@ -42,12 +42,19 @@ object TvDialog {
         val onClick: () -> Unit = {}
     )
 
-    /** 纯提示对话框：标题 + 消息 + 一个「好」。 */
+    /**
+     * 纯提示对话框：标题 + 消息 + 一个「好」。
+     *
+     * ⚠️ [onConfirm] 必须排在**最后**：Kotlin 的尾随 lambda 绑的是最后一个参数，
+     * 全工程有 3 处 `confirm(...) { ... }` 写法，把 onDismiss 放最后会让
+     * 「退出登录 / 下载更新」的确认逻辑永远不执行。传 onDismiss 一律写命名参数。
+     */
     fun message(
         ctx: Context,
         title: String,
         message: String,
         confirmText: String = "好",
+        onDismiss: (() -> Unit)? = null,
         onConfirm: (() -> Unit)? = null
     ): Dialog {
         val tv = TextView(ctx).apply {
@@ -58,16 +65,17 @@ object TvDialog {
         }
         return show(ctx, title, tv, listOf(Btn(confirmText, primary = true) {
             onConfirm?.invoke()
-        }))
+        }), onDismiss = onDismiss)
     }
 
-    /** 二次确认对话框：取消 + 主按钮。 */
+    /** 二次确认对话框：取消 + 主按钮（参数顺序同 [message]，理由见那里）。 */
     fun confirm(
         ctx: Context,
         title: String,
         message: String,
         confirmText: String = "确定",
         cancelText: String = "取消",
+        onDismiss: (() -> Unit)? = null,
         onConfirm: () -> Unit
     ): Dialog {
         val tv = TextView(ctx).apply {
@@ -79,7 +87,7 @@ object TvDialog {
         return show(ctx, title, tv, listOf(
             Btn(cancelText),
             Btn(confirmText, primary = true) { onConfirm() }
-        ))
+        ), onDismiss = onDismiss)
     }
 
     /**

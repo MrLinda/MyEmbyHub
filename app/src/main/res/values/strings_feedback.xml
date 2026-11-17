@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设备反馈（上报到自建服务器）的文案。
+
+    ⚠️ 「会采集什么」必须在界面上写清楚 —— 这不是合规表演，
+       而是让用户知道「报上去的东西能不能公开」（里面会有局域网 IP、
+       Wi-Fi 名称、设备指纹）。写明白了，反馈才有人愿意点。
+-->
+<resources>
+    <string name="feedback">反馈</string>
+
+    <string name="feedback_intro">会把设备信息一起带上：系统版本、屏幕、内存、网络、TLS 握手实测结果、解码器支持情况、最近一次播放的编码参数、最近几条错误。\n\n不含账号密码和片库内容。</string>
+
+    <string name="feedback_note_hint">哪一步不对？播的哪部片？屏幕上显示了什么？</string>
+
+    <string name="feedback_send">上报</string>
+    <string name="feedback_cancel">取消</string>
+
+    <string name="feedback_collecting">正在采集设备信息…\n要实测 TLS 握手和建解码器，大约几秒</string>
+
+    <string name="feedback_ok">已收到，编号 #%1$d</string>
+    <string name="feedback_failed">上报失败：%1$s</string>
+
+    <string name="feedback_no_server">这个版本没有配置反馈服务器。\n\n自己部署了反馈服务的话，在 local.properties 里写一行\nfeedbackUrl=https://你的域名\n然后重新打包。服务端在仓库旁边的 MyEmbyHub-feedback 目录，不随公开仓库发布。</string>
+</resources>

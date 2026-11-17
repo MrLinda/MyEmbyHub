@@ -2,6 +2,7 @@ package work.luxiaoxiao.myembyhub.net
 
 import android.content.Context
 import android.content.SharedPreferences
+import work.luxiaoxiao.myembyhub.BuildConfig
 
 /**
  * 会话与凭据持久化。
@@ -56,6 +57,23 @@ class Session private constructor(private val sp: SharedPreferences) {
     val updateManifest: String
         get() = updateManifestUrl.ifEmpty { UpdateManager.DEFAULT_MANIFEST }
 
+    /**
+     * 设备反馈服务器地址（如 `https://feedback.example.com`）。
+     *
+     * 用户填的优先，没填走打包时烤进来的 [BuildConfig.FEEDBACK_URL]。
+     * 留空 = 这个版本没配反馈服务，界面上会提示「没有配置反馈服务器」。
+     *
+     * ⚠️ 反馈服务端**不在这个公开仓库里**（放在 `MyEmbyHub-feedback`），
+     * 所以地址只能由使用者自己填或自己打包时指定。
+     */
+    var feedbackUrl: String
+        get() = sp.getString(KEY_FEEDBACK_URL, "") ?: ""
+        set(v) = sp.edit().putString(KEY_FEEDBACK_URL, v).apply()
+
+    /** 实际要上报的地址：用户填的优先，没填走打包默认值。 */
+    val feedbackEndpoint: String
+        get() = feedbackUrl.ifEmpty { BuildConfig.FEEDBACK_URL }
+
     val isLoggedIn: Boolean get() = token.isNotEmpty() && server.isNotEmpty()
 
     fun clear() {
@@ -70,6 +88,7 @@ class Session private constructor(private val sp: SharedPreferences) {
         private const val KEY_USER_ID = "user_id"
         private const val KEY_PASS = "password"
         private const val KEY_UPDATE_URL = "update_manifest_url"
+        private const val KEY_FEEDBACK_URL = "feedback_url"
 
         /**
          * 默认的版本清单地址（GitHub Release 固定资产）。

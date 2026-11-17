@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.RecyclerView
 import work.luxiaoxiao.myembyhub.BuildConfig
 import work.luxiaoxiao.myembyhub.R
 import work.luxiaoxiao.myembyhub.net.EmbyApi
+import work.luxiaoxiao.myembyhub.net.ErrorLog
 import work.luxiaoxiao.myembyhub.net.MediaItem
 import work.luxiaoxiao.myembyhub.net.PhoneControlServer
 import work.luxiaoxiao.myembyhub.net.QrUtil
@@ -294,6 +295,10 @@ class HomeActivity : Activity() {
 
         session = Session.get(this)
         api = EmbyApi(this, session.server, session.token, session.userId)
+
+        // 装全局异常钩子：电视上没法看 logcat，崩过一次就再也查不到原因。
+        // 装在这里而不是 Application：只有一个入口需要它，且幂等。
+        ErrorLog.install()
 
         if (!session.isLoggedIn) {
             startActivity(Intent(this, LoginActivity::class.java))
@@ -1471,6 +1476,7 @@ class HomeActivity : Activity() {
                 TvMenu.Item("检查更新", "从 GitHub Release 取新版本") {
                     UpdateUi.check(this, worker, main, ::toast)
                 },
+                TvMenu.Item("反馈", "把设备信息发给开发者") { showFeedback() },
                 TvMenu.Item("刷新首页", "重新取一遍数据") {
                     pageReady.fill(false)
                     if (tabIndex == 0) loadHome(focusFirst = false) else switchTab(0)
@@ -1480,6 +1486,19 @@ class HomeActivity : Activity() {
             ),
             onDismiss = { restoreFocusAfterDialog() }
         )
+    }
+
+    /**
+     * 反馈入口。
+     *
+     * 菜单的 `onDismiss` 已经把闸门放开、焦点扶回来了，但反馈框是**新开的窗口** ——
+     * 它一关，Activity 重新拿焦点，系统会把焦点塞给第一个 tab，
+     * 于是「焦点即切换」立刻把页面拽回首页。所以这里再关一次闸门，
+     * 由 [FeedbackUi] 在所有出口（取消 / 返回 / 成功 / 失败）回调 `restoreFocusAfterDialog`。
+     */
+    private fun showFeedback() {
+        suppressTabSwitch = true
+        FeedbackUi.show(this, worker, main, ::toast) { restoreFocusAfterDialog() }
     }
 
     /**

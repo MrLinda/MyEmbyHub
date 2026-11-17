@@ -11,7 +11,9 @@ import android.widget.TextView
 import work.luxiaoxiao.myembyhub.R
 import work.luxiaoxiao.myembyhub.net.EmbyApi
 import work.luxiaoxiao.myembyhub.net.EmbyHttpDataSource
+import work.luxiaoxiao.myembyhub.net.ErrorLog
 import work.luxiaoxiao.myembyhub.net.MediaItem
+import work.luxiaoxiao.myembyhub.net.PlaybackSnapshot
 import work.luxiaoxiao.myembyhub.net.Session
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem as ExoMediaItem
@@ -172,6 +174,10 @@ class PlayerActivity : Activity() {
         val mediaSourceId = intent.getStringExtra(EXTRA_MEDIA_SOURCE_ID) ?: ""
         val startMs = intent.getLongExtra(EXTRA_START_MS, 0L)
 
+        // 每播一个新条目先把快照清干净 —— 否则「上一部片播放失败」的报错
+        // 会被当成「这一部片」的现场一起报上去，反馈就白填了。
+        PlaybackSnapshot.reset(title, itemId)
+
         if (itemId.isNotEmpty()) {
             api = EmbyApi(this, session.server, token, session.userId)
             reportItem = MediaItem(
@@ -244,6 +250,8 @@ class PlayerActivity : Activity() {
                 var a = 0
                 var codec = ""
                 var size = ""
+                var audioCodec = ""
+                var bitrate = 0
                 for (g in tracks.groups) {
                     if (g.type == com.google.android.exoplayer2.C.TRACK_TYPE_VIDEO) {
                         v++
@@ -251,9 +259,16 @@ class PlayerActivity : Activity() {
                             val f = g.getTrackFormat(0)
                             codec = f.sampleMimeType ?: ""
                             size = "${f.width}x${f.height}"
+                            bitrate = if (f.bitrate == com.google.android.exoplayer2.Format.NO_VALUE) 0
+                            else f.bitrate / 1000
                         }
                     }
-                    if (g.type == com.google.android.exoplayer2.C.TRACK_TYPE_AUDIO) a++
+                    if (g.type == com.google.android.exoplayer2.C.TRACK_TYPE_AUDIO) {
+                        a++
+                        if (audioCodec.isEmpty() && g.length > 0) {
+                            audioCodec = g.getTrackFormat(0).sampleMimeType ?: ""
+                        }
+                    }
                 }
                 // 视频轨存在 ≠ 能播：设备没有对应解码器时 ExoPlayer 会静默跳过这条轨，
                 // 表现为「黑屏但进度条在走、音频正常」。
@@ -266,6 +281,17 @@ class PlayerActivity : Activity() {
                 videoSupported = tracks.isTypeSupported(com.google.android.exoplayer2.C.TRACK_TYPE_VIDEO)
                 videoCodecInfo = "${codec.ifEmpty { "未知" }}  $size"
                 diag("tracks video=$v audio=$a videoSupported=$videoSupported")
+
+                // 反馈上报要用的现场快照（内存态，进程内一直留着「最近一次」）
+                PlaybackSnapshot.videoCodec = codec
+                PlaybackSnapshot.audioCodec = audioCodec
+                PlaybackSnapshot.bitrateKbps = bitrate
+                PlaybackSnapshot.width = tracks.groups.firstOrNull {
+                    it.type == com.google.android.exoplayer2.C.TRACK_TYPE_VIDEO && it.length > 0
+                }?.let { it.getTrackFormat(0).width } ?: 0
+                PlaybackSnapshot.height = tracks.groups.firstOrNull {
+                    it.type == com.google.android.exoplayer2.C.TRACK_TYPE_VIDEO && it.length > 0
+                }?.let { it.getTrackFormat(0).height } ?: 0
             }
 
             // 注意：2.19.1 里这个回调有两个重载，这里用两参数版（三参数版多一个
@@ -291,6 +317,7 @@ class PlayerActivity : Activity() {
             ) {
                 diag("decoder=$decoderName init=${initializationDurationMs}ms")
                 decoderInitialized = true
+                PlaybackSnapshot.decoderName = decoderName
             }
 
             override fun onRenderedFirstFrame(
@@ -299,6 +326,7 @@ class PlayerActivity : Activity() {
                 renderTimeMs: Long
             ) {
                 firstFrameRendered = true
+                PlaybackSnapshot.firstFrame = true
                 diag("FIRST FRAME rendered")
                 main.post {
                     // 出画了就说明之前那句「解不了」是误报，必须收掉；
@@ -357,6 +385,10 @@ class PlayerActivity : Activity() {
                     }
                     tvError.text = "播放失败：${error.errorCodeName}\n$raw$hint"
                     diag("ERROR ${error.errorCodeName}")
+                    // 反馈上报要带走的现场：错误码 + 原始消息（含 4.3 那些误导性文案）
+                    PlaybackSnapshot.errorCode = error.errorCodeName
+                    PlaybackSnapshot.errorMessage = raw.take(600)
+                    ErrorLog.record("player:${error.errorCodeName}", raw.take(400))
                     // 已经失败了就别再显示网速，否则会一直跳数字让人误以为还在加载
                     hideSpeed()
                     showDiag()

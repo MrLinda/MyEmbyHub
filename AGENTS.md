@@ -82,7 +82,8 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 `app` 模块的 UI 是 XML/Views（**不是 Compose**，Compose 要 API 21），
 网络层在 `app/src/main/java/work/luxiaoxiao/myembyhub/net/`：
 `TlsStack` / `BundledCa` / `UrlKit` / `EmbyHttpDataSource` / `TrustMode` /
-`EmbyApi` / `Session` / `QrUtil` / `UpdateManager` / `ImageLoader` / `PhoneControlServer`。
+`EmbyApi` / `Session` / `QrUtil` / `UpdateManager` / `ImageLoader` / `PhoneControlServer` /
+`DeviceReport`（设备反馈：采集 + 上报）/ `PlaybackSnapshot`（最近一次播放的内存快照 + 错误环形缓冲）。
 
 > 历史上还有两个探针模块：`tvcheck`（TLS 协商 / 播放解码 / 5102 远程配置）和
 > `tvprobe`（设备自检，零依赖 Java）。真机验证全部通过后已删除，
@@ -291,6 +292,19 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   - ⚠️ **`python -m http.server` 不支持 Range**：ExoPlayer 发 `Range: bytes=N-`，它老实地回 200 + 整个文件，
     客户端发现对不上就报 `ExoPlaybackException: Source error` —— 看起来像解码失败，其实是服务端不会分片。
     `tools/serve-range.py` 是带 Range（206 + `Content-Range`）的替代品。
+- ⚠️ **`MediaCodecList` 的静态方法和实例方法不是一回事**（设备反馈踩的）：
+  `MediaCodecList(ALL_CODECS).codecCount` / `.getCodecInfoAt(i)` 是 **API 21** 才加的**实例**方法，
+  4.3 上根本没有 → 清单永远是 0 条，但 `createDecoderByType` 探测却跑得通，
+  症状是「解码器列表空着、探测结果有」，很容易误判成数据没存上。
+  正解：反射**静态**方法 `MediaCodecList.getCodecCount()` / `MediaCodecList.getCodecInfoAt(i)`
+  （这两个在现代 SDK 里被标 @hide，编译期引用不到）。
+  另：`isHardwareAccelerated` / `isSoftwareOnly` 都是 API 29+，4.3 上反射必失败 →
+  用名字前缀判（`OMX.google.*` = 软解，`OMX.<厂商>.*` = 硬解）。
+- ⚠️ **`TvDialog.message/confirm` 的参数顺序不能随手排**：Kotlin 尾随 lambda 绑的是**最后一个**参数。
+  全工程有 3 处 `confirm(...) { 退出登录 / 下载更新 }` 的写法，
+  把 `onDismiss` 放到 `onConfirm` 后面会让那些确认逻辑变成「关闭回调」——
+  点「退出」毫无反应、点「下载」什么都不发生，而编译期一点错都不报。
+  → `onConfirm` 必须留在参数表最后；要传 `onDismiss` 一律写命名参数。
 - ⚠️ **AGP 8.0 起 `BuildConfig` 不再自动生成** → 必须写
   `buildFeatures { buildConfig = true }`。
   忘了的话运行时 `Class.forName("…BuildConfig")` 抛 `ClassNotFoundException`，

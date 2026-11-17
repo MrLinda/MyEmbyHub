@@ -27,6 +27,20 @@ val updateHost = (project.findProperty("updateHost") as String?)
     ?: "192.168.1.50:8765"
 
 /**
+ * 设备反馈服务器地址（如 `https://feedback.example.com`）。
+ *
+ * 反馈服务端**不在这个公开仓库里**（它是给作者自己部署的，放在平级目录
+ * `MyEmbyHub-feedback`），所以这里默认空串 —— 公开构建出来的包没有反馈服务，
+ * 界面上会提示「没有配置反馈服务器」，用户可以在设置里自己填。
+ *
+ * 自己用的时候写在 `local.properties` 里（已 gitignore）：
+ * `feedbackUrl=https://你的域名`
+ */
+val feedbackUrl = (project.findProperty("feedbackUrl") as String?)
+    ?: localProps.getProperty("feedbackUrl")
+    ?: ""
+
+/**
  * APK 的下载地址。
  *
  * `releases/latest/download/<资产名>` **不带 tag**，永远指向最新一个正式 Release
@@ -94,6 +108,9 @@ android {
         buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
         // 版本清单的完整地址（同样烤进来，避免 Kotlin 侧再拼一遍）
         buildConfigField("String", "UPDATE_MANIFEST", "\"$manifestUrl\"")
+
+        // 设备反馈服务器（空 = 这个包没配反馈服务）
+        buildConfigField("String", "FEEDBACK_URL", "\"$feedbackUrl\"")
 
         // versionCode 用**秒级时间戳**：
         // ① 永远递增 → 覆盖安装不会被系统以「版本号相同」拒绝；
