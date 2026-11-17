@@ -123,7 +123,7 @@
 | 单独 `TLS_ECDHE_RSA_WITH_AES_128/256_CBC_SHA` | ✅ 成功 |
 | 单独 `TLS_RSA_WITH_AES_128/256_CBC_SHA` | ✅ 成功 |
 | 单独 `TLS_DHE_RSA_WITH_AES_128_CBC_SHA` | ✗ `sslv3 alert handshake failure`（服务器不认 DHE） |
-| 系统自带的 curl（OpenSSL 1.0.1e）直连 | ✅ 成功，拿到 `{"ServerName":"MICU Cloud Media","Version":"4.8.11.0"}` |
+| 系统自带的 curl（OpenSSL 1.0.1e）直连 | ✅ 成功，拿到 `{"ServerName":"Emby Server","Version":"4.8.11.0"}` |
 
 **关键结论**：**Android 4.3 的系统 JSSE 本身完全够用**，
 只需①显式把 `enabledProtocols` 抬到 `TLSv1.2`（或 1.1）②用自带锚点信任 LE 链。

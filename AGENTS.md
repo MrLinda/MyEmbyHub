@@ -90,8 +90,14 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 
 `dist/` 是交付产物目录（APK、在线更新清单 `version.json`）；`tools/` 是辅助脚本。
 
+> **在线更新走 GitHub Release**（主源）+ 国内镜像前缀加速，细节见
+> [docs/online-update.md](docs/online-update.md)。发版：
+> `pwsh tools/publish-release.ps1 -Repo <owner>/<repo> -Tag v1.0.xxx`。
+> 打包时用 `local.properties` 里的 `updateRepo=<owner>/<repo>` 决定清单里的下载地址；
+> 不填则退回 `updateHost` 指向的局域网静态服务（只用于调试，别发 Release）。
+
 > ⚠️ `gradlew :app:assembleDebug` **只生成 `dist/version.json`，不会把 APK 拷进 `dist/`** ——
-> 打包后要手动同步（`python -c "import shutil; shutil.copy(...)"`），
+> 打包后要手动同步（`tools/publish-release.ps1` 会自动补这一步），
 > 否则电视在线更新会下载到旧包。
 > 在线更新清单里的 `versionCode` 必须是**秒级时间戳**，永远递增才能覆盖安装。
 > （实测：乐视 4.3 的安装器**允许同 versionCode 覆盖安装**，`status=0`，
@@ -261,6 +267,29 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   `Map<String, List<String>>`（**不能带 `?`**，否则编译报 "not a subtype"）。
 - ⚠️ `DataSource` 要**保留服务器返回的原始头名大小写** —— ExoPlayer 按
   `"Content-Length"` 精确匹配，转小写就找不到。
+- ⚠️⚠️ **模拟器（`LeTV` AVD / `sdk_x86` / API 18）不是「能不能播」的判据 —— 别拿它当代码 bug**（2026-11-16 实测）：
+  - `/system/etc/media_codecs.xml` 里视频解码器**只有 `OMX.google.h264.decoder`**
+    （外加 `mpeg4` / `h263` / `vpx`），**没有 HEVC、没有 AV1、没有任何硬解**。
+  - 这个 4.x 时代的 AOSP 软解器**只吃 Baseline profile**：库里 1080p High（`avc1.640029`）直接
+    `D/MediaCodecInfo: NoSupport [codec.profileLevel, avc1.640029, video/avc]` →
+    `E/ACodec: [OMX.google.h264.decoder] ERROR(0x80001001)` →
+    `ExoPlaybackException: MediaCodecVideoRenderer error, format_supported=NO_EXCEEDS_CAPABILITIES`。
+    → **跟转码、码率、DataSource、解码参数全都无关，是镜像本身解不了。**
+  - 对照实测：ffmpeg 生成的 **1280×720 Baseline H.264** 能完整播到 `00:20 / 00:20`、零报错
+    （截图全黑是这台老模拟器**不抓 SurfaceView 层**，不代表没画面）。
+  - → **「转码 / PlaybackInfo / TranscodingUrl」这条链路在模拟器上也无法验证**：
+    上游没有可用的 HEVC 解码器，服务端转了也看不出对错。要验播放只能上真机
+    （MStar 硬解 `OMX.MS.AVC.Decoder` / `OMX.MS.HEVC.Decoder`，1080p 零丢帧已验）。
+  - → 只在模拟器上验 UI / 焦点 / 取数时，用本地 Baseline 片跑通播放器外壳即可：
+    ```
+    python tools/serve-range.py 8765 dist        # ⚠️ 必须用这个，见下
+    adb shell am start -n work.luxiaoxiao.myembyhub/.ui.PlayerActivity \
+      --es url 'http://10.0.2.2:8765/t.mp4' --es title LocalTest \
+      --es item_id local --es media_source_id local --el start_ms 0
+    ```
+  - ⚠️ **`python -m http.server` 不支持 Range**：ExoPlayer 发 `Range: bytes=N-`，它老实地回 200 + 整个文件，
+    客户端发现对不上就报 `ExoPlaybackException: Source error` —— 看起来像解码失败，其实是服务端不会分片。
+    `tools/serve-range.py` 是带 Range（206 + `Content-Range`）的替代品。
 - ⚠️ **AGP 8.0 起 `BuildConfig` 不再自动生成** → 必须写
   `buildFeatures { buildConfig = true }`。
   忘了的话运行时 `Class.forName("…BuildConfig")` 抛 `ClassNotFoundException`，

@@ -22,7 +22,7 @@ versionCode 1793710453，8,427,317 字节）。
 | 系统 JSSE 够用 | 4.3 用 TLSv1.2 + 内置锚点握手成功 | 诊断矩阵 B 段 |
 | 登录跑通 | HTTP 200，AccessToken 32 位 | `/sdcard/tvcheck-login.txt` |
 | 硬解能力 | H.264=`OMX.MS.AVC.Decoder`，HEVC=`OMX.MS.HEVC.Decoder`（都硬解） | `/sdcard/tvcheck-decode.txt` |
-| 端到端 API | `/System/Info/Public` 200（MICU Cloud Media 4.8.11.0）；`/Items` 200，TotalRecordCount 795080 | `/sdcard/tvcheck-tls.txt` E 段 |
+| 端到端 API | `/System/Info/Public` 200（Emby Server 4.8.11.0）；`/Items` 200，TotalRecordCount 795080 | `/sdcard/tvcheck-tls.txt` E 段 |
 | 取流 URL | `/Videos/{itemId}/stream?static=true&mediaSourceId={msId}` | 电视 curl 实测 206 |
 | 302 目标 | `v10.example.com` / `v11.example.com`（**多节点，域名会变**，必须动态跟随） | 5.6.2 |
 | 网络实播 | ✅ READY / 1080p / 硬解 / 零丢帧（mkv+hevc / mp4+h264 / mkv+h264） | 5.7 节 |

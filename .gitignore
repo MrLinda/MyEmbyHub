@@ -29,6 +29,8 @@ tools/tlsprobe/out2/
 # ---------- 本地备份 ----------
 # _backup/ 是历史代码快照，纯本地留档
 /_backup/
+# _re/ 是拆包分析别的 App 时的产物（dex / arsc / 字符串表），既占地方也不该公开
+/_re/
 # AGENTS.local.md 是 AGENTS.md 的本机私有副本（保留真实域名/IP），不进仓库
 /AGENTS.local.md
 
@@ -38,6 +40,11 @@ tools/tlsprobe/out2/
 *.conf.*
 conf-backup.txt
 write_conf.py
+
+# ---------- 不公开的分析笔记 ----------
+# 拆解别家 App 的界面实现写成的笔记：结论可以参考，但里面带对方的产品名和类名，
+# 公开仓库里放这个不合适。文件留在本机。
+/docs/chaichai-layout-teardown.md
 
 # ---------- 其它本机痕迹 ----------
 *.log
