@@ -51,3 +51,5 @@ write_conf.py
 *.err
 captures/
 .externalNativeBuild/
+# 提交时临时写的提交说明文件
+/_msg.txt
