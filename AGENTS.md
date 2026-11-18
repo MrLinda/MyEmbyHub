@@ -54,6 +54,9 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
    → **已排除**。2026-11-03 真机实测：4.3 的系统 JSSE 用 TLSv1.2 + 内置锚点
    **握手成功**（`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`）。
    **不需要 Conscrypt，也不需要 Bouncy Castle。**
+   （2026-11-18 补充：Conscrypt 后来**还是接进来了**，但目的不是救这台服务器，
+   而是救「只开 GCM 套件的新式服务器」——见第 6 节「TLS 实现」。
+   系统 JSSE 那条路一条都没删，仍是兜底。）
 4. **必须带 SNI**（2026-11-09 新增，见第 6 节「SNI 缺失」）。
 
 > ⚠️ **测服务器时务必先确认本机 DNS 有没有被 Clash 劫持**：
@@ -90,6 +93,10 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 > ssl_prefer_server_ciphers on;
 > ```
 > 客户端救不回来 —— 4.3 的 JSSE 里根本没有 GCM 实现，除非整包换 Conscrypt。
+>
+> ✅ **2026-11-18 已换**：`app` 现在内置 Conscrypt 2.5.2（见第 6 节「TLS 实现」），
+> 只开 GCM 的服务端也能连上了。上面那段服务端 nginx 改法仍然有用
+> （老客户端 / 别的设备还要靠它），但**不再是本 App 的前提条件**。
 
 ---
 
@@ -105,7 +112,8 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 网络层在 `app/src/main/java/work/luxiaoxiao/myembyhub/net/`：
 `TlsStack` / `BundledCa` / `UrlKit` / `EmbyHttpDataSource` / `TrustMode` /
 `EmbyApi` / `Session` / `QrUtil` / `UpdateManager` / `ImageLoader` / `PhoneControlServer` /
-`DeviceReport`（设备反馈：采集 + 上报）/ `PlaybackSnapshot`（最近一次播放的内存快照 + 错误环形缓冲）。
+`DeviceReport`（设备反馈：采集 + 上报）/ `PlaybackSnapshot`（最近一次播放的内存快照 + 错误环形缓冲）/
+`Udf` / `IsoPlayback`（光盘镜像直放）。
 
 > 历史上还有两个探针模块：`tvcheck`（TLS 协商 / 播放解码 / 5102 远程配置）和
 > `tvprobe`（设备自检，零依赖 Java）。真机验证全部通过后已删除，
@@ -414,6 +422,31 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   新建 / 池里捞的 / 缓存复用的都算）；② `onViewRecycled` 里清掉选中样式，别污染池子；
   → 症状：用户图里 3 个 tab 同时高亮；排查：`uiautomator dump` 数 `rv_left` 里 `selected=true` 的节点，
   正常应该**恒为 1**。
+- ⚠️ **`OnKeyListener` 里 `return true` 前必须确认焦点真的被抢走了**（2026-11-18 真机踩）：
+  用户报「首页遥控器只能上右下，左键没反应」——两个独立原因叠在一起：
+  ① `onKeyDown` 里 `KEYCODE_DPAD_LEFT, KEYCODE_DPAD_RIGHT -> true` 把左键也吃掉了；
+  ② `onLeftFromFirstColumn` 写成
+  `{ val chip = homeMoreChips.getOrNull(rowIndex); chip?.requestFocus(); true }` ——
+   **该区块没有「更多」按钮时 `chip` 是 null**，`requestFocus()` 空转，但照样 `return true`
+   → 按键被吞、焦点不动，观感就是「这个键坏了」。
+  → 正确写法（`HomeActivity.kt` 现在这样）：
+  ```kotlin
+  // 行首按 ←：先找「更多」按钮，够不着就回顶栏；两条都失败才放给框架
+  if (chip != null && chip.isShown && chip.requestFocus()) true
+  else navItems.getOrNull(tabIndex)?.requestFocus() != null
+  // 顶栏上按 ←：直接去顶栏第一个 tab（否则顶栏也是「死」的）
+  KeyEvent.KEYCODE_DPAD_LEFT -> { navItems.getOrNull(tabIndex)?.requestFocus(); true }
+  ```
+  → 通用原则：**方向键的 fallback 一定要有去处**（回顶栏 / 回行首），
+    不要为了「防越界」把按键吃掉 —— 吃掉比乱跳更像 bug。
+  → 验证手法（模拟器逐次按键 + dump，一次只按一下）：
+  ```
+  adb shell input keyevent 21   # ←
+  adb shell uiautomator dump /data/local/tmp/t.xml
+  adb shell cat /data/local/tmp/t.xml   # 看 focused="true" 那个节点的 bounds/text
+  ```
+  实测轨迹：第二排卡片 → `更多 ›`（`[1777,577][1878,628]`）→ 顶栏「首页」tab，
+  每一步都有落点，不再卡死。
 - ⚠️ **遥控器菜单别用系统 `AlertDialog` + `ListView`**：系统对话框在 4.3 上是 Holo 蓝框 +
   青色标题分隔线，跟 App 的暖色语言完全两套，像「塞进来的系统弹窗」。
   → 现在 `TvMenu` 是 **透明窗口 + 自绘面板**：
@@ -460,6 +493,149 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   （`登录失败 HTTP 401 无效用户名或密码。请重试。`），
   于是用户在登录页上看到「登录已过期」，会以为是自己网络坏了，反复重试。
   → 解法：登录路径用 `friendlyLoginError(e)`（401 → 「账号或密码不对」，其余转交 `friendlyError`）。
+- ✅ **TLS 实现可选 Conscrypt（2026-11-18 落地，解决「只开 GCM 的服务器连不上」）**：
+  `TlsStack` 现在是**双实现**：Conscrypt（首选，自带 BoringSSL + GCM/ChaCha20/TLS1.3）
+  和系统 JSSE（兜底，只有 CBC 套件）。
+  - 依赖：`org.conscrypt:conscrypt-android:2.5.2`（**必须 2.5.x**：更高版本要 API 21+；
+    2.5.2 的 manifest 是 `minSdkVersion=9`，`org.conscrypt.PreKitKatPlatformOpenSSLSocketImplAdapter`
+    专门给 4.3 用，它继承 `org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl`）。
+  - `app/build.gradle.kts` 里 `ndk { abiFilters += listOf("armeabi-v7a", "x86") }`：
+    Conscrypt AAR 自带四个 ABI（共 ~8MB），电视只要 armeabi-v7a、模拟器只要 x86，
+    砍掉 arm64/x86_64 省 4.6MB。APK 因此从 2.27MB 涨到 4.11MB。
+  - **不要 `Security.insertProviderAt()` 装全局 Provider** —— 那会替换整个进程的 JSSE。
+    `TlsStack.conscrypt()` 是 `SSLContext.getInstance("TLS", Conscrypt.newProvider())`，
+    作用域只在本 App 自己 new 的 context 上。
+  - 全程**反射**调 `org.conscrypt.Conscrypt`（`Class.forName` + `getMethod`）：
+    万一某个 ABI 上 `.so` 缺失，`UnsatisfiedLinkError` 能被 catch 住自动退回系统栈，
+    而不是在类校验阶段炸掉整个 `TlsStack`。
+  - SNI 要分支：Conscrypt 建的 socket 走 `Conscrypt.setHostname()`（它同时负责 SNI 和
+    **证书主机名校验**，漏了会验证失败）；老系统才走反射 `OpenSSLSocketImpl.setHostname()`。
+    `TlsStack.applyServerName()` 的第 ⓪ 步就是干这个。
+  - 用户可在**设置 → TLS 实现**里选「自动 / Conscrypt / 系统 JSSE」（存 `SharedPreferences`
+    的 `myembyhub_tls`/`impl`，改完清 `TlsStack.cache`）。真出问题能当场锁回系统栈。
+  - 判定当前走的哪条路：`adb logcat -s TlsStack`，会出现
+    `TLS 使用 Conscrypt（GCM/ChaCha20 可用）` 或 `Conscrypt 不可用，退回系统 JSSE（只有 CBC 套件）`。
+  - 实测（API 18 模拟器）：一个只开 `ECDHE-ECDSA-AES128-GCM-SHA256` 的站，
+    系统 JSSE 下报「安全连接失败」，Conscrypt 下直接拿到 Emby 的 401 应答
+    （说明握手 + 证书链全过）；同时另一台 CBC/GCM 都开的站两边都能连。
+  - `proguard-rules.pro` 要 `-keep class org.conscrypt.** { *; }` +
+    `-keep interface org.conscrypt.** { *; }` + `-dontwarn org.conscrypt.**`
+    （AAR 自带 proguard.txt 只有前一条，不 keep 会在运行时炸）。
+
+- ⚠️ **`ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED` 的一大来源：服务器把 `.iso` 光盘镜像挂进了媒体库**
+  （2026-11-18 实测，朋友的服 `emby.example.com`《玉簟秋》）：
+  该剧 40 集里有 **10 集**（第 9/10/11/12/14/17/18/19/20/21）媒体源文件是
+  `The.Lament.of.Autumn.2026.S01Exx.iso`，chaichai 与本项目报的错**一字不差**。
+  - Emby 扫库时会**读穿镜像**，所以 `PlaybackInfo` 里 `Container=mkv`、
+    视频流规格（1920×1080 / h264 High / 9.8Mbps）全都正常 —— 详情页看起来毫无异常。
+  - 但 `static=true` 直放吐的是**整张 ISO 的原始字节**：
+    前 32KB 全 `00`，`0x8000` 才是 UDF 描述符 `BEA01`，`0x8800` 是 `NSR03`；
+    服务端 Content-Type 也是 `application/octet-stream`。
+    十六个 extractor 挨个 sniff 全是零 → 谁也认不出来。
+  - 判定一行就够：`GET /Videos/{id}/stream?static=true&mediaSourceId=…` 跟着 302 看
+    `Location` 里 `response-content-disposition` 的文件名，后缀是 `.iso` 就是它。
+  - **服务端转码救不了**：这类站通常 `SupportsTranscoding=false`，
+    即便强行要 `/main.m3u8` 拿到了播放列表，拉切片会回
+    `400 User does not have video remuxing permission.`（权限卡死，不是 ffmpeg 问题）。
+  - **客户端现在能直接放**（见下面那条「✅ ISO / BDMV 直放」）。
+    解析失败时才退回文案提示：`PlayerActivity.onPlayerError` 里按 cause 链
+    匹配 `None of the available extractors` 加一句「服务器上这一集是光盘镜像」的提示。
+    ⚠️ 别再拿 `error.message` 去匹配 —— `PlaybackException.message` 只有外层那句
+    `"Source error"` / `"Renderer error."`，真正能诊断的文本在 `cause` 链里，
+    要用 `generateSequence(error as Throwable?) { it.cause }` 拼起来再判断。
+  - 4K 那几集（1/2/3/4/5/7/8/13/16/23/33）在模拟器上会走另一条错
+    （`NO_EXCEEDS_CAPABILITIES` + `OMX.google.h264.decoder`），那是**模拟器软解只吃 Baseline**，
+    与本条无关，别混为一谈（见第 6 节模拟器小节）。
+
+- ✅ **ISO / BDMV 直放（2026-11-18 落地，纯 Kotlin，无 native 依赖）**：
+  客户端现在能自己拆 UDF 光盘镜像、找到正片、剥壳交给 `TsExtractor` 播。
+  两个新文件：`app/src/main/java/work/luxiaoxiao/myembyhub/net/Udf.kt`（UDF 2.50 解析）
+  和 `app/src/main/java/work/luxiaoxiao/myembyhub/net/IsoPlayback.kt`（DataSource 适配）。
+  接入点只有一个：`PlayerActivity` 里把
+  `DataSource.Factory { EmbyHttpDataSource(this, token) }` 换成
+  `IsoDataSourceFactory(this, token, Uri.parse(url))`。
+  - **判定不写死后缀**，就发一次 8 字节 Range 读 sector 16，看 `BEA01`：
+    `.mkv` / `.mp4` 那次探测失败 → 原样透传 `EmbyHttpDataSource`，零回归；
+    连 ISO 的都是几十次小块 Range，比 sniff 整个文件便宜得多。
+  - **解析链**（`Udf.parse`）：anchor(256) → VDS → PD(`partitionStart` @188) → LVD →
+    在物理分区扫 `fileType=250` 找元数据文件得 `metaStart` → FSD（LVD+248 的 long_ad）→
+    扫 FSD 里 `len==2048` 且目标块 `fileType==4` 得根目录 → `BDMV/STREAM/` 挑最大的 m2ts → EFE 取 extent 表。
+  - ⚠️ **VDS 必须按 2048 扇区步进扫描**，不能用「offset 10 的 CRC 长度」推算：
+    这张盘 PVD 该字段读到 5780（512 字节的 PVD 不该这么长），照它算会跳过后面的 PD/LVD
+    → 报「找不到 PD/LVD」。
+  - ⚠️ **FID 里的文件名是 d-string**（首字节是压缩标识：`0x08` 后接 8 位字符、`0x10` 后接 UCS-2）。
+    直接当 UTF-8 解会得到 `"\u0008BDMV"`，和 `"BDMV"` 永不相等 → 报「不是蓝光结构」。
+  - ⚠️ **long_ad 的 partRef 是权威值，0 也算数**。正片的 ICB 在元数据分区（partRef=1）、
+    extent 在物理分区（partRef=0），早期写成「非 0 才采用」→ 整条映射偏了 65536 个扇区，
+    读出来的「头」是 `B8 68 88 27`，认不出 TS sync。现在无条件取
+    `u16(blk, adStart + k + 8)`。
+  - ⚠️ **extent 长度是 2048（扇区）的整数倍，不是 192 的整数倍**
+    （实测 `1071644672 = 523264 × 2048`）。2048 不整除 192 →
+    **一个 192 字节包可能横跨两个 extent**。早期按「每 extent 有几个整包」算
+    → `ISO 窗口只读到 598/600 个包` + `0/2 个包` 反复，播放卡死。
+    → 现在按**字节**映射：`readDiskRange(logicalStart, length)` 把逻辑字节偏移
+      换算到 extent 内位置、跨段时拆成几次 Range 拼进 `rawBuf`，再统一剥壳。
+  - **剥壳**：蓝光 m2ts 每 192 字节 = 4 字节 ATS 头 + 188 字节标准 TS。
+    `TsExtractor` 的 `TS_PACKET_SIZE = 188`、sync 固定在 0/188/376…
+    → 必须 `arraycopy(rawBuf, src+4, win, dst, 188)`。
+    包长靠探测：`head[4]==0x47 && head[4+192]==0x47 && head[4+384]==0x47` 是 192+4；
+    `head[0]==0x47...` 是 188+0（有些人把 m2ts 存成标准 TS）。
+  - **纯 Kotlin 无 native**：没引 libbluray / libmpv，4.3 能跑，APK 不涨
+    （打出来仍是 ~4.13MB，只是多了十几 KB 字节码）。
+    → 这也是和「用 mpv 外挂播放」的分界线。
+  - 不做蓝光导航菜单（`index.bdmv` / `PLAYLIST` / `CLIPINF` 一律不读），只放
+    `STREAM/` 里最大的那个 m2ts；AACS 加密盘（有 `AACS/` 目录）不在范围。
+  - 实测（emulator-5554 / API 18）：解析出
+    `Video(name=00000.m2ts, extents=4, first=(start=917504, len=1071644672),
+    packetSize=192, prefixLen=4, logicalLength=3483865600, totalBytes=3557990400)`，
+    进度条能走到 `01:55 / 47:42` 并持续前进 → 时间轴、缓冲、seek 都正常。
+    模拟器只有 `OMX.google.h264.decoder` 且只吃 Baseline，1080p High 只出声音不出画，
+    **出画要在电视上验**。
+  - 判定走的哪条路：`adb logcat -s IsoPlay:*`，会看到
+    `ISO 解析结果：Video(...)`（成功）或 `UDF 解析失败：<原因>`（失败退回原路径）。
+  - ⚠️ **Emby 元数据里的编码不可信，以镜像里实际字节为准**（2026-11-18 真机实测）：
+    某剧第 9 集的 Emby `PlaybackInfo` 报 `h264 High 1080p`，但把镜像里
+    `BDMV/STREAM/00000.m2ts` 剥壳存成 `.ts` 后 `ffprobe` 读出来是
+    **`hevc Main 3840x2160 level=153`（4K HEVC）**，`codec_tag=HDMV`。
+    电视上表现就是「**有声音、没画面**」——MStar 的 `OMX.MS.HEVC.Decoder` 上限是 1080p，
+    logcat 依次是 `NoSupport [codec.profileLevel, hvc1.1.6.L153.90, video/hevc]` →
+    `Format exceeds selected codec's capabilities` → `MS_OMX_HEVCDEC Error Code: 1000003`。
+    **ISO 解析本身没问题**（音轨出、进度走、seek 正常），纯粹是硬解吃不下。
+    → 所以「ISO 能不能播」要分两件事看：镜像**拆得开**（客户端已解决）和
+      里面正片**这台机器解码得了**（4K 就认命）。
+    判定手法：`adb shell am start ...` 播一下，再 `adb logcat | Select-String 'hevc|exceeds'`。
+  - ⚠️ **ExoPlayer 2.19.1 遇到「解码器建起来但每帧都被硬解拒绝」不会抛错**：
+    视频轨被静默跳过、音频照播，`onPlayerError` 一声不响 ——
+    用户看到的就是「有声音没画面、界面上什么提示都没有」。
+    → `PlayerActivity.checkVideoStalled()` 因此改成两轮：
+      第 1 轮（起播 15 秒）判「解码器根本没建起来」；第 2 轮（再过 20 秒）判
+      「解码器建起来了、就是一帧不出」，提示「这台电视的硬解吃不下这个规格（多见于 4K HEVC）」。
+      早期写的是 `if (decoderInitialized) return` —— 正好把这种最常见的情况放过。
+  - ✅ **硬解预检 + 白屏兜底（2026-11-18）**：`PlayerActivity.checkHardwareCapability(format)`
+    在 `onVideoInputFormatChanged` 里用 `MediaCodecUtil.getDecoderInfos(mime,false,false)` +
+    `MediaCodecInfo.isFormatSupported(format)` 提前判 —— 就是打出 `NoSupport [codec.profileLevel…]`
+    的同一个函数。**全都不支持才判死**，查询抛异常 / 一条解码器都查不到一律放行（宁可试，别误伤）。
+  - ⚠️ **「白屏」的成因是没摘视频层**：`showCodecLimit()` 里必须
+    `player.videoComponent.clearVideoSurface()`。不摘的话那块白/灰一直盖着文案
+    （硬件 video plane 优先于 View 合成，既不受 Surface 黑底控制、也不跟窗口背景走）。
+  - ⚠️ 光在 `showSpeed()` 里加守卫不够：`speedTick` 那个 0.5 秒的 Runnable 会自己把
+    「正在缓冲… / x.x MB/s」刷回去盖在错误文案上 —— **它也必须 `if (capabilityBlocked) return`**。
+  - ⚠️ **RecyclerView 不会替你滚长排**（2026-11-18 实测）：focus search 只在**已布局**的孩子里
+    找邻居。一排 20 条、屏幕只够 8 张时，走到第 8 张按 → 就彻底不动了（1.2 秒按一次也一样，
+    不是时序问题），后面十几张永远够不着。
+    → `PosterAdapter` 自己接管 ←/→：`moveTo()` 先试 `requestFocus()` 已布局的目标，
+      没布局出来就 `rv.scrollBy(step, 0)` + `postOnAnimation` 重试；`step` 从两个兄弟实测
+      （`b.left - a.left`），取不到才退回卡宽。
+    → ⚠️ 两个反例：`post {}` 的 runnable 常排在那次遍历**之前**跑，目标还没 attach，白跑；
+      `scrollToPosition()` 会按「让目标贴边」重排整排，和焦点自己触发的
+      `requestChildRectangleOnScreen` 打架，实测焦点来回抖。用 `scrollBy` + `postOnAnimation`。
+  - 首页方向键语义（用户 2026-11-18 定的，别再改回去）：
+    行首 ← **什么都不做**（早期两版都被否：`chip?.requestFocus(); true` 空转还吞键；
+    「找不到 chip 就回顶栏」太跳）；「更多 ›」← 回本排末卡；行末 → 跳「更多 ›」。
+    「更多 ›」在**区块标题那一行**的右端（header 里），是 RecyclerView 的**兄弟视图**，
+    框架的 focus search 永远找不到它 —— 要靠 `onRightFromLastCard` 手工连。
+    ⚠️ 行首判定别写 `position % firstColumnCount == 0`：首页每排传 `firstColumnCount = 1`，
+    取模 1 恒为 0 → **每张卡都被当成行首**，按 ← 就乱跳（这就是「非最左边也跳去更多键」的真凶）。
 
 ## 7. 工程构建坑位（AGP 9.5 / Gradle 9.6）
 
