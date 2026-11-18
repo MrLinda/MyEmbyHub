@@ -33,7 +33,17 @@ class PhoneControlServer(
     private val mode: String,
     private val onLogin: (server: String, token: String, username: String, userId: String) -> Unit,
     private val onSearch: (String) -> Unit,
-    private val onFail: (String) -> Unit
+    private val onFail: (String) -> Unit,
+    /**
+     * 服务**自己**活到 [MAX_LIFE_MS] 上限而关闭时回调（不是用户主动 [stop] 触发的）。
+     *
+     * 为什么要它：界面上那张二维码看起来永远是好的，可服务一死，手机扫过去
+     * 只会得到「无法连接」—— 用户会以为电视断网了。有了这个回调，
+     * 电视端能明确改成「二维码已过期，按刷新重新生成」。
+     *
+     * ⚠️ **跑在 worker 线程**，改 View 必须先切主线程。
+     */
+    private val onExpire: (() -> Unit)? = null
 ) {
 
     companion object {
@@ -218,6 +228,16 @@ function doSearch() {
     @Volatile
     private var running = false
 
+    /**
+     * 服务是否还活着。
+     *
+     * ⚠️ 别用 `instance != null` 判断：这个服务有 **10 分钟自杀**（[MAX_LIFE_MS] 到点后
+     * 定时线程自己调 `stop()`），死掉之后调用方手里的引用还在、`running` 已经是 false。
+     * 界面要「按刷新就真的重开」就必须问这里，否则会画出一张指向死端口的二维码
+     * —— 手机扫过去只看到「无法连接」，而电视上一切正常。
+     */
+    val isRunning: Boolean get() = running
+
     fun start() {
         if (running) return
         val srv: ServerSocket
@@ -256,7 +276,14 @@ function doSearch() {
                 Thread.currentThread().interrupt()
                 return@execute
             }
+            // 走到这里只有一种可能：不是被 stop() 打断，而是到了 10 分钟上限。
+            // 先看 running —— stop() 和超时正好撞上时，别把「用户主动关掉」误报成过期。
+            val expired = running
             stop()
+            if (expired) {
+                Log.i(TAG, "服务到 $MAX_LIFE_MS ms 上限，自动关闭")
+                onExpire?.invoke()
+            }
         }
     }
 

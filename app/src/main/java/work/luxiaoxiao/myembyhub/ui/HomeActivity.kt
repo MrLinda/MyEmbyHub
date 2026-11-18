@@ -35,6 +35,7 @@ import work.luxiaoxiao.myembyhub.net.PhoneControlServer
 import work.luxiaoxiao.myembyhub.net.QrUtil
 import work.luxiaoxiao.myembyhub.net.Session
 import work.luxiaoxiao.myembyhub.net.SortOption
+import work.luxiaoxiao.myembyhub.net.TlsStack
 import work.luxiaoxiao.myembyhub.net.friendlyError
 import java.util.concurrent.Executors
 
@@ -202,10 +203,11 @@ class HomeActivity : Activity() {
     private var pendingFocusItemId: String? = null
 
     /**
-     * 每条横滑行右侧的「更多 ›」按钮，索引跟 [homeRows] 对齐（没有就是 null）。
+     * 每条横滑行右侧的「更多 ›」，索引跟 [homeRows] 对齐（没有就是 null）。
      *
-     * 之所以要单独存：行首卡片按 ← 要跳到它身上，它按 ↓ 要跳回行首卡片 ——
-     * 两边互相持有引用会死循环，所以都存到 Activity 上按索引查。
+     * 「更多」在区块标题那一行最右端（header 里），不在卡片行里 —— 它是 RecyclerView 的
+     * **兄弟视图**，RecyclerView 自己找邻居永远找不到它，所以两边只能靠这里存引用：
+     * 行末卡按 → 跳到它身上，它按 ← 跳回行末卡（对称，一个不多一个不少）。
      */
     private val homeMoreChips = ArrayList<View?>()
 
@@ -654,8 +656,22 @@ class HomeActivity : Activity() {
                         homeRows.getOrNull(index)?.let { focusCardIn(it, 0) }
                         true
                     }
-                    // ←/→ 都吃掉：往右是屏幕边缘，往左会跑回顶栏，都不合理
-                    KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                    // ← 回本排最后一张卡（焦点左移一格）；→ 是屏幕边缘，吃掉合理。
+                    //
+                    // ⚠️ 原来 ← 直接送回顶栏 —— 2026-11-18 用户反馈：「更多键按左键
+                    //    会回到顶栏，按理说应该是焦点左移一个吧」。方向键就该是「移动一格」，
+                    //    「更多」在行末右侧，它左边正好是本排最后一张卡。
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        val rv = homeRows.getOrNull(index)
+                        val last = (rv?.adapter?.itemCount ?: 0) - 1
+                        if (rv != null && last >= 0) {
+                            focusCardIn(rv, last)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> true
                     else -> false
                 }
             }
@@ -696,10 +712,26 @@ class HomeActivity : Activity() {
             onUpFromFirstRow = { pos -> focusRowAbove(rowIndex, pos) },
             firstColumnCount = 1,
             onLeftFromFirstColumn = {
-                // 行首按 ←：有「更多」就去那儿，没有就吃掉
-                val chip = homeMoreChips.getOrNull(rowIndex)
-                chip?.requestFocus()
+                // 行首按 ←：不动，吃掉这次按键（2026-11-18 用户明确要求）。
+                //
+                // 历史两版都不对：
+                //   ① `chip?.requestFocus(); true` —— chip 为 null（「继续观看」这类区块
+                //      不指向媒体库）时 requestFocus 空转、按键却被吃掉，观感是「左键坏了」；
+                //   ② 改成「找不到 chip 就回顶栏」—— 焦点从行首直接甩到顶栏，
+                //      用户按 ← 想要的是「再往左挪一点」，不是「跳回导航条」。
+                // 现在的语义：行首就是这一排的最左边，← 到这里为止，什么都不发生。
+                // 要回顶栏请用 ↑（`onUpFromFirstRow` 接的就是这个）。
+                //
+                // ⚠️ 这次能真正生效的前提是 PosterAdapter 把「行首」判对了：
+                //    以前 `position % firstColumnCount == 0` 在 firstColumnCount = 1 时恒真，
+                //    每张卡按 ← 都会走到这里 —— 这才是「非最左边也跳去更多键」的真凶。
                 true
+            },
+            // 行末按 →：去这一排的「更多 ›」（区块标题那一行的右端）。
+            // 没有「更多」的区块返回 false，让框架照常把焦点带到下一排。
+            onRightFromLastCard = { _ ->
+                val chip = homeMoreChips.getOrNull(rowIndex)
+                if (chip != null && chip.isShown && chip.requestFocus()) true else false
             },
             onCardFocused = {
                 // 焦点落回第一排 → 整页滚回最顶，把区块标题也露出来。
@@ -1274,26 +1306,26 @@ class HomeActivity : Activity() {
      * 这是电视端唯一能在十秒内输入「星际穿越」的办法。
      */
     private fun startPhoneSearch() {
-        if (phoneServer != null) {
-            showQrDialog()
-            return
+        // isRunning 而不是 != null：服务会在 10 分钟上限自己关掉，
+        // 那时引用还在但端口早没了，直接复用会弹出一张扫不通的码
+        if (phoneServer?.isRunning != true) {
+            phoneServer = PhoneControlServer(
+                this,
+                mode = PhoneControlServer.MODE_SEARCH,
+                onLogin = { _, _, _, _ -> },
+                onSearch = { term ->
+                    main.post {
+                        qrDialog?.dismiss()
+                        qrDialog = null
+                        phoneServer?.stop()
+                        phoneServer = null
+                        runSearch(term)
+                        searchBox.requestFocus()
+                    }
+                },
+                onFail = { msg -> main.post { toast(msg) } }
+            ).also { it.start() }
         }
-        phoneServer = PhoneControlServer(
-            this,
-            mode = PhoneControlServer.MODE_SEARCH,
-            onLogin = { _, _, _, _ -> },
-            onSearch = { term ->
-                main.post {
-                    qrDialog?.dismiss()
-                    qrDialog = null
-                    phoneServer?.stop()
-                    phoneServer = null
-                    runSearch(term)
-                    searchBox.requestFocus()
-                }
-            },
-            onFail = { msg -> main.post { toast(msg) } }
-        ).also { it.start() }
         showQrDialog()
     }
 
@@ -1473,6 +1505,7 @@ class HomeActivity : Activity() {
             getString(R.string.home_settings),
             listOf(
                 TvMenu.Item("服务器信息") { showServerInfo() },
+                TvMenu.Item("TLS 实现", tlsImplLabel()) { showTlsMenu() },
                 TvMenu.Item("检查更新", "从 GitHub Release 取新版本") {
                     UpdateUi.check(this, worker, main, ::toast)
                 },
@@ -1560,9 +1593,65 @@ class HomeActivity : Activity() {
             append("服务器：").append(session.server).append('\n')
             append("用户：").append(session.username).append('\n')
             append("客户端：").append(BuildConfig.VERSION_NAME).append('\n')
+            append("TLS：").append(tlsImplLabel()).append('\n')
             append("更新来源：").append(session.updateManifest)
         }
         TvDialog.message(this, "服务器信息", msg)
+    }
+
+    // ==================== TLS 实现 ====================
+
+    /** 菜单副标题 / 服务器信息里显示的那行字。 */
+    private fun tlsImplLabel(): String = when (TlsStack.pref()) {
+        TlsStack.TlsImpl.AUTO ->
+            if (TlsStack.conscryptAvailable() == false) "自动（Conscrypt 不可用，已退回系统库）"
+            else "自动（优先 Conscrypt）"
+        TlsStack.TlsImpl.CONSCRYPT -> "强制 Conscrypt"
+        TlsStack.TlsImpl.SYSTEM -> "系统 JSSE（只有 CBC）"
+    }
+
+    /**
+     * TLS 实现选择。
+     *
+     * ## 为什么要有这个开关
+     *
+     * 4.3 的系统 JSSE 只有 CBC 套件，只开 GCM 的服务端根本连不上（见 [TlsStack] 注释）。
+     * 默认改成 Conscrypt 之后，绝大多数情况不用管这一页。留这个入口是因为：
+     *
+     * - 某些 ROM 上 Conscrypt 的原生库可能加载不了或行为异常，
+     *   此时用户可以自己锁回系统栈，而不是「这版彻底连不上」；
+     * - 排查问题时需要一次性对比两条栈的握手结果。
+     *
+     * 改完必须重连：SSLContext 与 socket 池里全是旧栈建出来的连接，
+     * 所以这里提示「回到登录页重新登录一次」。
+     */
+    private fun showTlsMenu() {
+        suppressTabSwitch = true
+        val cur = TlsStack.pref()
+        TvMenu.show(
+            this,
+            "TLS 实现",
+            listOf(
+                TvMenu.Item(
+                    "自动",
+                    if (cur == TlsStack.TlsImpl.AUTO) "当前" else "优先 Conscrypt，失败退回系统库"
+                ) { applyTlsImpl(TlsStack.TlsImpl.AUTO) },
+                TvMenu.Item(
+                    "Conscrypt",
+                    if (cur == TlsStack.TlsImpl.CONSCRYPT) "当前" else "强制使用，支持 GCM / TLS 1.3"
+                ) { applyTlsImpl(TlsStack.TlsImpl.CONSCRYPT) },
+                TvMenu.Item(
+                    "系统 JSSE",
+                    if (cur == TlsStack.TlsImpl.SYSTEM) "当前" else "只有 CBC 套件，新式站点连不上"
+                ) { applyTlsImpl(TlsStack.TlsImpl.SYSTEM) }
+            ),
+            onDismiss = { restoreFocusAfterDialog() }
+        )
+    }
+
+    private fun applyTlsImpl(impl: TlsStack.TlsImpl) {
+        TlsStack.setPref(this, impl)
+        toast("TLS 实现已切换到「${tlsImplLabel()}」，建议重新登录一次")
     }
 
     private fun confirmLogout() {

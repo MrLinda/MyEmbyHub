@@ -32,17 +32,38 @@
 }
 
 # ---------------------------------------------------------------------------
-# 2. BouncyCastle —— 只在 TlsStack.kt:93 用 Class.forName 探测
+# 2. BouncyCastle —— 历史遗留的探测入口，现在已换成 Conscrypt
 #
-#   Class.forName("org.bouncycastle.jsse.provider.BouncyCastleProvider")
-#
-# 这条依赖**根本没有打进 APK**（app 的 dependencies 里没有 bcprov/bctls），
-# 反射必然失败并被 catch 住，属于正常的「探测失败」路径。
-# 但 R8 会因为找不到这个类而报 warning，加 -dontwarn 静音即可。
+#   （TlsStack.kt 已不再引用 BC，这两条 -dontwarn 留着不影响任何东西，
+#     避免旧依赖树里残留的引用触发 warning）
 # ---------------------------------------------------------------------------
 -dontwarn org.bouncycastle.**
 -dontwarn javax.naming.**
 -dontwarn sun.security.**
+
+# ---------------------------------------------------------------------------
+# 2.1 Conscrypt —— **必须整包 keep**
+#
+# 它通过 JNI 和反射干活：
+#   - `libconscrypt_jni.so` 按类名/方法名找 Java 侧实现；
+#   - 4.3 上走 `PreKitKatPlatformOpenSSLSocketImplAdapter`，
+#     这个类继承系统的 `org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl`，
+#     是**按名字**由反射选出来实例化的（Platform.wrapSocketFactoryIfNeeded）；
+#   - Provider 里的 Cipher / KeyAgreement / TrustManager 都由
+#     `java.security` 框架按字符串名字反射构造。
+# 一旦被 R8 改名或裁掉：运行时冒 UnsatisfiedLinkError / NoSuchAlgorithmException，
+# 表现是「一开 App 就连不上服务器」，极难和网络问题区分。
+# 官方 AAR 自带的 proguard.txt 就是 `-keep class org.conscrypt.** { *; }`，
+# 这里重复写一份（AGP 会合并，不会冲突），以防依赖配置变化后规则丢失。
+# ---------------------------------------------------------------------------
+-keep class org.conscrypt.** { *; }
+-keep interface org.conscrypt.** { *; }
+-dontwarn org.conscrypt.**
+-dontwarn dalvik.system.BlockGuard
+-dontwarn dalvik.system.BlockGuard$Policy
+-dontwarn dalvik.system.CloseGuard
+-dontwarn com.android.org.conscrypt.**
+-dontwarn org.apache.harmony.xnet.provider.jsse.**
 
 # ---------------------------------------------------------------------------
 # 3. 反射 / JNI 敏感：老系统 + 布局里用全限定类名的控件

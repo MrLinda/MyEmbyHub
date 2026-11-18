@@ -24,8 +24,10 @@ import work.luxiaoxiao.myembyhub.net.MediaItem
  *        注意不只是「视觉上的第一排」：第二排上面那一排可能已经被滚出屏幕，
  *        框架的几何 focus search 找不到它就会把焦点丢给顶栏，所以第二排也要自己接住。
  * @param onUpFromFirstRow 这些位置按 ↑。参数是位置序号，返回 true 表示外面已经处理掉这次按键。
- * @param firstColumnCount 每排几个（行 = 1；网格 = 每行几个）。位置能被它整除的就是行首，按 ← 回调 [onLeftFromFirstColumn]。
+ * @param firstColumnCount 每排几个（行 = 1；网格 = 每行几个）。行首按 ← 回调 [onLeftFromFirstColumn]。
+ *        注意「行首」不是「位置能被它整除」—— 参数是 1 时那样写恒真，见 [isRowStart]。
  * @param onLeftFromFirstColumn 行首按 ←。返回 true 表示外面已经处理掉。
+ * @param onRightFromLastCard 行末按 →。返回 true 表示外面已经处理掉（首页拿它去「更多 ›」）。
  * @param onCardFocused 某张卡拿到焦点（用来把整页滚回该回的姿势，见 `HomeActivity.createRow`）。
  */
 class PosterAdapter(
@@ -35,6 +37,7 @@ class PosterAdapter(
     private val onUpFromFirstRow: ((Int) -> Boolean)? = null,
     private val firstColumnCount: Int = 1,
     private val onLeftFromFirstColumn: (() -> Boolean)? = null,
+    private val onRightFromLastCard: ((Int) -> Boolean)? = null,
     private val onCardFocused: ((Int) -> Unit)? = null
 ) : RecyclerView.Adapter<PosterAdapter.Holder>() {
 
@@ -97,7 +100,7 @@ class PosterAdapter(
         }
 
         // 遥控器边界：交给外面处理，外面不接的话再让框架自己找邻居
-        holder.itemView.setOnKeyListener { _, keyCode, event ->
+        holder.itemView.setOnKeyListener { view, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
             when {
                 position < firstRowCount && keyCode == KeyEvent.KEYCODE_DPAD_UP ->
@@ -105,8 +108,21 @@ class PosterAdapter(
 
                 // ⚠️ 行首按 ← 必须外面接住。不接的话框架的 focus search 会往左上
                 //    找最近的可聚焦物 —— 正好是顶栏，用户按几下 ← 就被拽上去了（实测踩过）。
-                position % firstColumnCount == 0 && keyCode == KeyEvent.KEYCODE_DPAD_LEFT ->
+                isRowStart(position) && keyCode == KeyEvent.KEYCODE_DPAD_LEFT ->
                     onLeftFromFirstColumn?.invoke() ?: false
+
+                // 行末按 → 交给外面（首页用它跳到区块标题右边的「更多 ›」）。
+                // 不接的话 RecyclerView 只在自己肚子里找邻居，直接掉到下一排 ——
+                // 「更多」在 header 里，是它的兄弟视图，永远轮不到。
+                position == items.size - 1 && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ->
+                    onRightFromLastCard?.invoke(position) ?: false
+
+                // ⚠️ 行内左右挪动自己来。RecyclerView 的 focus search 只在自己
+                //    **已经布局出来**的孩子里找邻居：一排 20 条、屏幕只够 8 张时，
+                //    走到第 8 张按 → 就彻底不动了（框架不会替你滚，实测 1.2 秒按一次也一样），
+                //    后面十几张永远够不着。所以这里「滚一张卡 + 交焦点」自己做。
+                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT -> moveTo(view, position + 1)
+                keyCode == KeyEvent.KEYCODE_DPAD_LEFT -> moveTo(view, position - 1)
 
                 else -> false
             }
@@ -129,6 +145,67 @@ class PosterAdapter(
     }
 
     override fun getItemCount(): Int = items.size
+
+    /**
+     * 这个位置是不是所在行的第一个。
+     *
+     * ⚠️ 别写成 `position % firstColumnCount == 0`：首页每一排传的是 `firstColumnCount = 1`，
+     *    而任何整数取模 1 都是 0 —— 于是**每一张卡按 ← 都被当成「行首」**，
+     *    焦点从中间某张卡直接被丢去「更多」或顶栏，用户看到的是「左键乱跳」
+     *    （2026-11-18 真机反馈「在某排非最左边按左键也会回到更多键」就是这个）。
+     *    一维列表的行首只有第 0 个；只有网格才需要取模。
+     */
+    private fun isRowStart(position: Int): Boolean =
+        if (firstColumnCount > 1) position % firstColumnCount == 0 else position == 0
+
+    /**
+     * 焦点挪到同排的相邻卡片，不够宽就先滚。
+     *
+     * 顺序是「目标已在布局里就直接交焦点，否则滚动一张卡的距离再重试」——
+     * 用 `scrollBy` 而不是 `scrollToPosition`：后者会按「让目标贴边」重排整排，
+     * 和焦点自己触发的 `requestChildRectangleOnScreen` 打架，实测会来回抖。
+     *
+     * @return 是否接管了这次按键（拿不到 RecyclerView 就返回 false，让框架照旧处理）
+     */
+    private fun moveTo(view: View, target: Int): Boolean {
+        if (target < 0 || target >= items.size) return false
+        val rv = view.parent as? RecyclerView ?: return false
+        rv.findViewHolderForAdapterPosition(target)?.itemView?.let {
+            if (it.requestFocus()) return true
+        }
+        val step = rowStep(rv, view)
+        rv.scrollBy(step, 0)
+        focusAt(rv, target, step, 3)
+        return true
+    }
+
+    /** 一张卡 + 间距的横向步长（从已布局的两个兄弟实测，取不到就按卡宽算）。 */
+    private fun rowStep(rv: RecyclerView, view: View): Int {
+        val a = rv.getChildAt(0)
+        val b = rv.getChildAt(1)
+        if (a != null && b != null && b.left > a.left && a.width > 0) {
+            return (b.left - a.left).coerceAtLeast(a.width)
+        }
+        return view.width.coerceAtLeast(1)
+    }
+
+    /**
+     * 等目标卡布局出来再交焦点（最多重试 [tries] 帧，每帧再滚 [step]）。
+     *
+     * ⚠️ 不能用 `post {}`：`scrollBy` 只是请求一次遍历，`post` 常常排在那次遍历之前跑，
+     *    此时目标卡还没 attach，`findViewHolderForAdapterPosition` 拿到 null —— 焦点原地不动。
+     *    `postOnAnimation` 排在遍历之后，稳。
+     */
+    private fun focusAt(rv: RecyclerView, position: Int, step: Int, tries: Int) {
+        rv.postOnAnimation {
+            val holder = rv.findViewHolderForAdapterPosition(position)
+            if (holder != null && holder.itemView.requestFocus()) return@postOnAnimation
+            if (tries > 0) {
+                rv.scrollBy(step, 0)
+                focusAt(rv, position, step, tries - 1)
+            }
+        }
+    }
 
     /** 换一批数据（第一页 / 换库 / 换关键词）。 */
     fun submit(list: List<MediaItem>) {

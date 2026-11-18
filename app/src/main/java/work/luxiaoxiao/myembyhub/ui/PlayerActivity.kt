@@ -1,6 +1,7 @@
 package work.luxiaoxiao.myembyhub.ui
 
 import android.app.Activity
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,6 +13,7 @@ import work.luxiaoxiao.myembyhub.R
 import work.luxiaoxiao.myembyhub.net.EmbyApi
 import work.luxiaoxiao.myembyhub.net.EmbyHttpDataSource
 import work.luxiaoxiao.myembyhub.net.ErrorLog
+import work.luxiaoxiao.myembyhub.net.IsoDataSourceFactory
 import work.luxiaoxiao.myembyhub.net.MediaItem
 import work.luxiaoxiao.myembyhub.net.PlaybackSnapshot
 import work.luxiaoxiao.myembyhub.net.Session
@@ -23,7 +25,6 @@ import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.analytics.AnalyticsListener
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector
-import com.google.android.exoplayer2.upstream.DataSource
 import com.google.android.exoplayer2.video.VideoSize
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -72,6 +73,27 @@ class PlayerActivity : Activity() {
     /** 解码器建起来了（哪怕还没出画）—— 说明编码是能解的，只是慢。 */
     private var decoderInitialized = false
 
+    /**
+     * 「迟迟没有第一帧」检查跑了几轮。
+     *
+     * 第一轮（起播后 15 秒）判「解码器都没建起来」这种情况；
+     * 第二轮（再过 20 秒）判「解码器建起来了、音频也在走，就是一帧都不出」——
+     * 后者是**硬解能力超限但被 ExoPlayer 静默跳过**的典型表现
+     * （2.19.1 只在 logcat 里打一句 `Format exceeds selected codec's capabilities`，
+     * 界面上什么都不说，用户看到的就是「有声音没画面」）。
+     */
+    private var stallRound = 0
+
+    /** 解码能力预检只做一次（视频轨格式确定后立刻判）。 */
+    private var capabilityChecked = false
+
+    /**
+     * 已经判定「这条视频轨超出硬解能力」并接管了界面。
+     *
+     * 一旦为 true：网速浮层、卡顿提示都不再掺和，避免两套文案互相覆盖。
+     */
+    private var capabilityBlocked = false
+
     private var player: ExoPlayer? = null
     private val main = Handler(Looper.getMainLooper())
 
@@ -96,7 +118,10 @@ class PlayerActivity : Activity() {
      */
     private val speedTick = object : Runnable {
         override fun run() {
-            if (!speedVisible) return
+            // capabilityBlocked：已经判定「硬解吃不下」，界面归错误文案独占 ——
+            // 这颗定时器自己会把速度/「正在缓冲…」刷回去，光靠 showSpeed() 里的
+            // 守卫挡不住（那是另一条路径），所以在这里直接停。
+            if (!speedVisible || capabilityBlocked) return
             val now = android.os.SystemClock.elapsedRealtime()
             val total = EmbyHttpDataSource.bytesRead()
             val dt = now - lastSampleAt
@@ -192,7 +217,18 @@ class PlayerActivity : Activity() {
         // ⚠️ 每次 createDataSource() 必须返回**新实例**：
         // ExoPlayer 会并发使用多个 DataSource（嗅探 + 正式读取），
         // 而我们的 DataSource 是有状态的（各自持有 socket）。
-        val dsFactory = DataSource.Factory { EmbyHttpDataSource(this, token) }
+        //
+        // 换成 IsoDataSourceFactory：它会先用一次 8 字节的 Range 判断「这条流装的是不是
+        // 光盘镜像（.iso / BDMV）」。不是就原样透传给 EmbyHttpDataSource，行为和以前
+        // 一模一样；是的话就在客户端里把 BDMV/STREAM 的正片 m2ts 解出来、
+        // 剥掉 192→188 的包壳，当成普通 TS 流喂给 ExoPlayer（见 net/IsoPlayback.kt）。
+        //
+        // 之前这类片源只能报 ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED：
+        // ISO 开头 32KB 全是 0，十六个 extractor 挨个 sniff 全是 zeros。
+        val isoSteps: (String) -> Unit = { step ->
+            main.post { if (!firstFrameRendered) tvSpeedHint.text = "$step…" }
+        }
+        val dsFactory = IsoDataSourceFactory(this, token, Uri.parse(url), isoSteps)
 
         // 缓冲水位：默认的 50s/2.5s 在这台机器 + 公网 4K 源上太浅，
         // 稍微掉点速就开始转圈。这里加大到 30s 起步、最多囤 2 分钟 ——
@@ -307,6 +343,8 @@ class PlayerActivity : Activity() {
                 }
                 // Format.codec 不存在，编解码器信息在 sampleMimeType / codecs 里
                 diag("videoIn ${format.sampleMimeType} ${format.width}x${format.height} $hdr")
+                // 这一轨能不能硬解，趁格式刚确定就问清楚 —— 别等用户对着白屏干等 35 秒。
+                checkHardwareCapability(format)
             }
 
             override fun onVideoDecoderInitialized(
@@ -375,13 +413,50 @@ class PlayerActivity : Activity() {
                 main.post {
                     tvError.visibility = View.VISIBLE
                     val raw = error.message ?: ""
+                    // ⚠️ `error.message` 只有外层那一句（"Source error" / "Renderer error."），
+                    // 真正能诊断的那句在 cause 链里（UnrecognizedInputFormatException 的
+                    // "None of the available extractors (...)" / MediaCodec 的 "format_supported=…"）。
+                    // 原来只拿 message 去 contains("404")，等于永远匹配不到 —— 2026-11-18 实测踩到。
+                    val chain = generateSequence(error as Throwable?) { it.cause }
+                        .mapNotNull { it.message }
+                        .joinToString(" | ")
                     // HTTP 404 基本只有一个原因：取流 URL 少了 mediaSourceId，
                     // v10 纯文件后端直接拒绝（见 EmbyApi.streamUrl 注释）。
                     // 直接把这个提示打出来，省得下次又误判成「服务器挂了」。
-                    val hint = if (raw.contains("404")) {
-                        "\n\n取流地址可能缺少 mediaSourceId —— 服务端 v10 对缺这个参数的请求一律 404。"
-                    } else {
-                        ""
+                    val hint = when {
+                        chain.contains("404") ->
+                            "\n\n取流地址可能缺少 mediaSourceId —— 服务端 v10 对缺这个参数的请求一律 404。"
+                        // 硬解能力不够：MStar 的 HEVC 解码器上限是 1080p，
+                        // 4K HEVC（Level 5.1 及以上）会在 logcat 里报
+                        //   NoSupport [codec.profileLevel, hvc1.1.6.L153.90, video/hevc]
+                        //   Format exceeds selected codec's capabilities
+                        //   ES_OMX_HEVCDEC Error Code: 1000003
+                        // 有时走这条路（抛错），有时静默跳过视频轨只留音频。
+                        // 两条路都要给同一句人话，所以 checkVideoStalled() 里也有一份。
+                        chain.contains("exceeds selected codec", ignoreCase = true) ||
+                        chain.contains("NO_EXCEEDS_CAPABILITIES", ignoreCase = true) ||
+                        chain.contains("ERROR(0x80001001)", ignoreCase = true) ->
+                            "\n\n这一集的视频轨超出了这台电视的硬解能力（多为 4K / 高位深 HEVC）。\n" +
+                            "音频能正常播放，但画面出不来。换 1080p 的片源，或用支持 4K 的设备播放。"
+                        // PARSING_CONTAINER_UNSUPPORTED 只有一种常见来路，值得说人话：
+                        // 服务端把**光盘镜像**（.iso / BDMV）当媒体文件挂进库里。
+                        //
+                        // 客户端现在**已内置 ISO 直放**（net/Udf.kt + net/IsoPlayback.kt）：
+                        // 会自己进 BDMV/STREAM 找正片、剥掉 m2ts 的 4 字节 ATS 头还原成
+                        // 标准 188 字节 TS 再交给 TsExtractor。所以走到这个分支，说明
+                        // 不是「客户端不会解」，而是那次解析没成功（盘结构不典型 / 读取中断 /
+                        // 加密盘 / 传输层抽风）。让用户先重试一次，再不行才提转码。
+                        //
+                        // 2026-11-18 实测：emby.example.com《玉簟秋》第 9 集，
+                        // 文件 `The.Lament.of.Autumn.2026.S01E09.iso`，chaichai 与本项目报的错一字不差。
+                        chain.contains("None of the available extractors", ignoreCase = true) ||
+                        chain.contains("UnrecognizedInputFormat", ignoreCase = true) ->
+                            "\n\n这个流不是能直接播放的视频容器。多半是服务器上这一集的文件" +
+                            "是光盘镜像（.iso / BDMV）—— 客户端会尝试自动解析镜像内部的正片，\n" +
+                            "但这一次没成功（结构不典型、读取中断，或盘是加密的）。\n" +
+                            "先按「重试播放」再来一次；仍然不行的话，把取流地址用浏览器打开、\n" +
+                            "看保存下来的文件名是不是 .iso，是的话只能让服主把这一集转成 mkv/mp4。"
+                        else -> ""
                     }
                     tvError.text = "播放失败：${error.errorCodeName}\n$raw$hint"
                     diag("ERROR ${error.errorCodeName}")
@@ -439,6 +514,8 @@ class PlayerActivity : Activity() {
 
     /** 起播阶段显示网速浮层，并启动 0.5 秒采样。 */
     private fun showSpeed(hint: String = "正在缓冲…") {
+        // 已经判定「硬解吃不下」时，界面归那条错误文案独占 —— 别再冒出「正在缓冲…」
+        if (capabilityBlocked) return
         if (!speedVisible) {
             peakBytesPerSec = 0L
             lastBytes = EmbyHttpDataSource.bytesRead()
@@ -500,11 +577,31 @@ class PlayerActivity : Activity() {
      * 拿它当结论就会出现「一边报解不了、一边正常播」。
      */
     private fun checkVideoStalled() {
-        if (firstFrameRendered) return
-        // 解码器都建起来了 = 编码本身能解，只是 4K 起播慢（真机上首帧要十几秒）。
-        // 这种情况什么都不弹，安静等着就行；想看细节可以按菜单键叫诊断面板。
-        if (decoderInitialized) return
-        if (videoTrackCount > 0 && !videoSupported) {
+        // capabilityBlocked：已经判过「硬解吃不下」并接管了界面，这里不能再刷另一套文案。
+        if (firstFrameRendered || capabilityBlocked) return
+        stallRound++
+
+        // ---- 第二轮：解码器建起来了，但 20 秒过去仍然一帧都没出 ----
+        //
+        // 真机上 4K 起播慢也就十几秒；到这会儿还不出帧，基本就是
+        // 「解码器能初始化、但每一帧都被硬解拒绝」——ExoPlayer 2.19.1 在这种情况下
+        // **不会**走 onPlayerError，视频轨被静默跳过，音频照播 → 黑屏有声。
+        // 2026-11-18 实测：4K HEVC L153 的 ISO 就是这样，logcat 只有
+        //   W/MediaCodecRenderer: Format exceeds selected codec's capabilities
+        //   E/MS_OMX_HEVCDEC: Error Code: 1000003
+        if (decoderInitialized) {
+            if (stallRound == 1) {
+                main.postDelayed({ checkVideoStalled() }, 20_000L)
+                return
+            }
+            showCodecLimit(videoCodecInfo)
+            showDiag()
+            return
+        }
+
+        // ---- 第一轮：解码器根本没建起来 ----
+        // 能力不匹配时 MediaCodec 会直接拒绝，这时不用再等。
+        if (videoTrackCount > 0) {
             tvError.visibility = View.VISIBLE
             tvError.text = "这台设备放不出这个视频画面\n\n" +
                 "编码：$videoCodecInfo\n" +
@@ -512,6 +609,82 @@ class PlayerActivity : Activity() {
                 "换一个 H.264 版本的片源，或者用支持该编码的设备播放。"
         }
         showDiag()
+    }
+
+    /**
+     * 解码能力预检：这台机器的硬解有没有可能吃下这条视频轨。
+     *
+     * 为什么必须提前判：MStar 的 HEVC 解码器**能创建、能 configure**，失败的只是逐帧解码。
+     * 这种情况下 ExoPlayer 2.19.1 只在 logcat 打一句
+     * `W/MediaCodecRenderer: Format exceeds selected codec's capabilities`，然后照播不误 ——
+     * 界面上声音正常、进度条正常走、**画面是白的**（那块是硬件视频层，不是 SurfaceView
+     * 的黑色背景，解码器出不来有效帧时它就不受 Surface 控制地白着/灰着）。
+     * 2026-11-18 真机：ISO 里的 4K HEVC（`hvc1.1.6.L153.90`，3840×2160）就是这样。
+     *
+     * 判断用的是 ExoPlayer 自己的 [MediaCodecInfo.isFormatSupported] —— 就是打出那句
+     * `NoSupport [codec.profileLevel, ...]` 的同一个函数，这里把它的结论当结果用。
+     *
+     * ⚠️ 只在**明确判死**时才动手：查询抛异常（老系统上 `DecoderQueryException` 很常见）、
+     *    或者一条解码器都查不到（那种情况 ExoPlayer 自己会报错），一律放行。
+     *    宁可试一下也不要误伤 —— 这台机器对 HEVC Main10 HDR 是能解的，而 4.3 的
+     *    MediaCodec 不上报 10bit 能力，误判方向只会是「假阴性」。
+     */
+    private fun checkHardwareCapability(format: com.google.android.exoplayer2.Format) {
+        if (capabilityChecked || capabilityBlocked || firstFrameRendered) return
+        val mime = format.sampleMimeType ?: return
+        if (!mime.startsWith("video/")) return
+        val infos = try {
+            com.google.android.exoplayer2.mediacodec.MediaCodecUtil
+                .getDecoderInfos(mime, false, false)
+        } catch (e: Exception) {
+            diag("cap? ${e.javaClass.simpleName}")
+            return
+        }
+        if (infos.isEmpty()) return
+        val supported = infos.any { info ->
+            try {
+                info.isFormatSupported(format)
+            } catch (e: Exception) {
+                true
+            }
+        }
+        capabilityChecked = true
+        if (supported) {
+            diag("cap ok ${infos.first().name}")
+            return
+        }
+        val spec = listOfNotNull(
+            format.codecs,
+            if (format.width > 0 && format.height > 0) "${format.width}×${format.height}" else null
+        ).joinToString(" / ")
+        diag("cap NO ${infos.joinToString { it.name }} $spec")
+        android.util.Log.i(TAG, "硬解吃不下这条视频轨：$mime $spec（设备只有 ${infos.joinToString { it.name }}）")
+        main.post { showCodecLimit(spec) }
+    }
+
+    /**
+     * 「这条视频轨这台机器解不了」的最终表现。
+     *
+     * 关键动作是 [com.google.android.exoplayer2.ExoPlayer.VideoComponent.clearVideoSurface]：
+     * 不摘掉视频层的话，屏幕上那块白色/灰色会一直盖着错误文案（硬件 plane 优先于 View 合成，
+     * 也不是「黑屏」——它在没有有效帧时既不受 Surface 控制、也不跟窗口背景走）。
+     * 摘掉之后窗口背景（`surface_base` 深色）才露出来，文案才看得见。
+     */
+    private fun showCodecLimit(spec: String) {
+        if (firstFrameRendered || capabilityBlocked) return
+        capabilityBlocked = true
+        videoSupported = false
+        hideSpeed()
+        try {
+            player?.videoComponent?.clearVideoSurface()
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "clearVideoSurface 失败：${e.javaClass.simpleName}")
+        }
+        tvError.text = getString(
+            R.string.player_video_unsupported,
+            if (spec.isEmpty()) videoCodecInfo else spec
+        )
+        tvError.visibility = View.VISIBLE
     }
 
     /** 把诊断面板顶到屏幕上。 */
@@ -643,6 +816,9 @@ class PlayerActivity : Activity() {
     }
 
     companion object {
+        /** logcat 过滤用：`adb logcat -s PlayAct:*`。电视没法截图，只能靠日志认路。 */
+        private const val TAG = "PlayAct"
+
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_ITEM_ID = "item_id"

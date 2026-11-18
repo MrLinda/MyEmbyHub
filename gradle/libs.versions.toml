@@ -21,6 +21,12 @@ zxing = "3.2.1"
 # BC 是纯 Java 实现，不依赖系统 OpenSSL，API 16+ 都能跑。
 # 用 jdk15on 坐标（Maven Central 上没有 -android 变体），字节码是 Java 5 级别，Dalvik 可跑。
 bouncycastle = "1.70"
+# Conscrypt：Google 的 BoringSSL JNI 封装，官方声明支持 **API 9+**，
+# AAR 里自带 jni/armeabi-v7a/libconscrypt_jni.so（1.28MB）以及
+# PreKitKatPlatformOpenSSLSocketImplAdapter（继承 4.3 的 OpenSSLSocketImpl），
+# 就是为了在 4.3 这种没有 GCM 套件的老系统上补出现代 TLS。
+# 见 app/src/main/java/work/luxiaoxiao/myembyhub/net/TlsStack.kt 的注释。
+conscrypt = "2.5.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -49,6 +55,8 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 # BC：jdk15on 坐标（Maven Central 无 -android 变体），字节码 Java 5 级别，Dalvik 可跑
 bcprov = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
 bctls = { group = "org.bouncycastle", name = "bctls-jdk15on", version.ref = "bouncycastle" }
+# Conscrypt：老系统上的现代 TLS 栈（AAR，含 armeabi-v7a / x86 原生库）
+conscrypt-android = { group = "org.conscrypt", name = "conscrypt-android", version.ref = "conscrypt" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

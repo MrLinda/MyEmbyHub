@@ -6,7 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.widget.Button
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
@@ -20,10 +20,12 @@ import java.util.concurrent.Executors
 /**
  * 登录页。
  *
- * 两种登录方式：
- * 1. **手机扫码登录**（推荐）：电视显示二维码，手机扫码后在手机上输入账号密码。
- *    这台电视没有软键盘，用遥控器敲密码几乎不可用。
- * 2. 电视端直接输入（服务器已经配好时其实用不上）。
+ * **进来就是扫码界面** —— 手机登录服务在 `onCreate` 里直接起来，二维码立刻画出来。
+ * 以前要先按一个「手机扫码登录」按钮才出二维码：遥控器上多按一次只是门槛，
+ * 而这一页存在的理由就是「电视没法打字」，那个按钮等于让用户先证明自己想扫码。
+ *
+ * 右边保留电视端直接输入的三个框做兜底（服务器地址 / 用户名 / 密码），
+ * 服务器已经配好或者临时换一台机器时还能用。
  */
 class LoginActivity : Activity() {
 
@@ -33,14 +35,18 @@ class LoginActivity : Activity() {
     private lateinit var etServer: EditText
     private lateinit var etUser: EditText
     private lateinit var etPass: EditText
-    private lateinit var btnLogin: Button
+    private lateinit var btnLogin: TextView
+    private lateinit var btnQrRefresh: TextView
     private lateinit var tvStatus: TextView
-
-    // ---- 扫码登录相关 ----
-    private lateinit var panelQr: View
     private lateinit var imgQr: ImageView
     private lateinit var tvQrUrl: TextView
+    private lateinit var tvQrPlaceholder: TextView
+
     private var loginServer: PhoneControlServer? = null
+
+    /** 页面是否已经销毁：worker 上的回调要自己判，别往死掉的 View 上写。 */
+    @Volatile
+    private var destroyed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,10 +56,11 @@ class LoginActivity : Activity() {
         etUser = findViewById(R.id.et_user)
         etPass = findViewById(R.id.et_pass)
         btnLogin = findViewById(R.id.btn_login)
+        btnQrRefresh = findViewById(R.id.btn_qr_refresh)
         tvStatus = findViewById(R.id.tv_status)
-        panelQr = findViewById(R.id.panel_qr)
         imgQr = findViewById(R.id.img_qr)
         tvQrUrl = findViewById(R.id.tv_qr_url)
+        tvQrPlaceholder = findViewById(R.id.tv_qr_placeholder)
 
         val session = Session.get(this)
         etServer.setText(session.server.ifEmpty { DEFAULT_SERVER })
@@ -61,11 +68,18 @@ class LoginActivity : Activity() {
         etPass.setText(session.password)
 
         btnLogin.setOnClickListener { doLogin() }
-        findViewById<Button>(R.id.btn_qr_login).setOnClickListener { startPhoneLogin() }
+        btnQrRefresh.setOnClickListener { startPhoneLogin() }
 
         if (session.isLoggedIn) {
             goLibrary()
+            return
         }
+
+        // 默认就是扫码：不用点，直接起服务画码
+        startPhoneLogin()
+        // 焦点落在「刷新二维码」上：遥控器一进来就有个明确的可按项，
+        // 而不是停在某个输入框里让用户以为自己要开始打字
+        btnQrRefresh.post { btnQrRefresh.requestFocus() }
     }
 
     // ==================== 电视端输入 ====================
@@ -77,10 +91,12 @@ class LoginActivity : Activity() {
 
         if (server.isEmpty()) {
             tvStatus.text = "请填写服务器地址"
+            etServer.requestFocus()
             return
         }
         if (user.isEmpty()) {
             tvStatus.text = "请填写用户名"
+            etUser.requestFocus()
             return
         }
 
@@ -91,11 +107,15 @@ class LoginActivity : Activity() {
         worker.execute {
             val result = api.login(user, pass)
             main.post {
+                if (destroyed) return@post
                 btnLogin.isEnabled = true
                 result.onSuccess { token ->
                     saveSession(api.server, token, user, pass, api.userId)
+                    stopPhoneLogin()
                     goLibrary()
                 }.onFailure { e ->
+                    // 登录路径专用：401 时说的是「账号或密码不对」，
+                    // 不能复用 friendlyError（它会把 401 翻成「登录已过期」）
                     tvStatus.text = getString(R.string.login_failed) + "：" +
                         work.luxiaoxiao.myembyhub.net.friendlyLoginError(e)
                 }
@@ -105,53 +125,79 @@ class LoginActivity : Activity() {
 
     // ==================== 手机扫码登录 ====================
 
+    /**
+     * 起手机登录服务并画二维码。
+     *
+     * 重复调用是安全的：服务还活着就只重画二维码；**已经死了也要能重新拉起来** ——
+     * [PhoneControlServer] 有 10 分钟自杀，用户可能就是在电视前看完一集回来才发现码过期了。
+     * 所以判断条件是 `isRunning`，不是 `loginServer == null`。
+     */
     private fun startPhoneLogin() {
-        if (loginServer != null) {
-            // 已经在扫码模式，刷新一次二维码
-            refreshQr()
-            return
-        }
-        panelQr.visibility = View.VISIBLE
-        tvStatus.text = "请用手机扫描下方二维码"
+        if (loginServer?.isRunning != true) {
+            tvStatus.text = getString(R.string.login_qr_waiting)
 
-        val server = PhoneControlServer(
-            this,
-            mode = PhoneControlServer.MODE_LOGIN,
-            onLogin = { srv, token, user, userId ->
-                main.post {
-                    tvStatus.text = "登录成功，正在进入媒体库…"
-                    saveSession(srv, token, user, "", userId)
-                    stopPhoneLogin()
-                    goLibrary()
+            loginServer = PhoneControlServer(
+                this,
+                mode = PhoneControlServer.MODE_LOGIN,
+                onLogin = { srv, token, user, userId ->
+                    main.post {
+                        if (destroyed) return@post
+                        tvStatus.text = "登录成功，正在进入媒体库…"
+                        saveSession(srv, token, user, "", userId)
+                        stopPhoneLogin()
+                        goLibrary()
+                    }
+                },
+                onSearch = { _ -> },
+                onFail = { msg ->
+                    main.post {
+                        if (!destroyed) tvStatus.text = "手机登录失败：$msg"
+                    }
+                },
+                onExpire = {
+                    // 服务自己到 10 分钟上限关了。二维码还在屏幕上、看着完全正常，
+                    // 但手机扫过去只会「无法连接」—— 必须在这里明说，
+                    // 否则用户会怀疑是电视断网了。
+                    main.post {
+                        if (destroyed) return@post
+                        tvQrPlaceholder.visibility = View.VISIBLE
+                        tvQrPlaceholder.text = getString(R.string.login_qr_expired)
+                        imgQr.setImageDrawable(null)
+                        tvStatus.text = getString(R.string.login_qr_expired_tip)
+                    }
                 }
-            },
-            onSearch = { _ -> },
-            onFail = { msg ->
-                main.post { tvStatus.text = "手机登录失败：$msg" }
-            }
-        )
-        loginServer = server
-        server.start()
+            )
+            loginServer?.start()
+        }
         refreshQr()
     }
 
     /** 生成二维码并显示。 */
     private fun refreshQr() {
+        tvQrPlaceholder.visibility = View.VISIBLE
+        tvQrPlaceholder.text = getString(R.string.login_qr_creating)
+
+        val port = PhoneControlServer.PORT
         worker.execute {
-            val url = QrUtil.selfUrl(this, PhoneControlServer.PORT, "/?mode=login")
-            val bmp = if (url.isEmpty()) null else QrUtil.encode(url, 640)
+            val url = QrUtil.selfUrl(this, port, "/?mode=login")
+            val bmp = if (url.isEmpty()) null else QrUtil.encode(url, 560)
             main.post {
+                if (destroyed) return@post
                 if (url.isEmpty()) {
-                    tvQrUrl.text = "拿不到电视的局域网 IP，无法生成二维码"
+                    tvQrPlaceholder.visibility = View.VISIBLE
+                    tvQrPlaceholder.text = getString(R.string.login_qr_no_ip)
                     imgQr.setImageDrawable(null)
-                } else {
+                    tvQrUrl.text = ""
+                    tvStatus.text = getString(R.string.login_qr_no_ip_tip)
+                } else if (bmp == null) {
+                    tvQrPlaceholder.visibility = View.VISIBLE
+                    tvQrPlaceholder.text = getString(R.string.login_qr_encode_failed)
+                    imgQr.setImageDrawable(null)
                     tvQrUrl.text = url
-                    if (bmp != null) {
-                        imgQr.setImageBitmap(bmp)
-                    } else {
-                        imgQr.setImageDrawable(null)
-                        tvQrUrl.text = "$url（二维码生成失败，请手动输入上面的地址）"
-                    }
+                } else {
+                    tvQrPlaceholder.visibility = View.GONE
+                    imgQr.setImageBitmap(bmp)
+                    tvQrUrl.text = url
                 }
             }
         }
@@ -160,7 +206,7 @@ class LoginActivity : Activity() {
     private fun stopPhoneLogin() {
         loginServer?.stop()
         loginServer = null
-        panelQr.visibility = View.GONE
+        tvQrPlaceholder.visibility = View.GONE
     }
 
     // ==================== 公共 ====================
@@ -181,10 +227,47 @@ class LoginActivity : Activity() {
         finish()
     }
 
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // 焦点从左边二维码列往右 / 往左走时，换列要落到一个真正可聚焦的项上，
+        // 否则框架会退回到「屏幕最上/最左那个」，用户看着像焦点丢了
+        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT &&
+            currentFocus === btnQrRefresh
+        ) {
+            etServer.requestFocus()
+            return true
+        }
+        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT &&
+            currentFocus === etServer
+        ) {
+            btnQrRefresh.requestFocus()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 系统栏会在焦点变化后偷偷回来，这里再收一次（跟 HomeActivity 同一套处理）
+        if (hasFocus) hideSystemBars()
+    }
+
     override fun onDestroy() {
+        destroyed = true
         loginServer?.stop()
         worker.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun hideSystemBars() {
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LOW_PROFILE
     }
 
     companion object {

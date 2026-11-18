@@ -1,6 +1,7 @@
 package work.luxiaoxiao.myembyhub.net
 
 import android.content.Context
+import android.util.Log
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
@@ -10,96 +11,220 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 /**
- * TLS 栈工厂：系统 JSSE 与 Bouncy Castle 两套。
+ * TLS 栈工厂：**Conscrypt（首选）与系统 JSSE（兜底）两条路**。
  *
- * 为什么需要 BC：
- * 目标电视是 Android 4.3 / API 18，它的系统 JSSE 是 OpenSSL 1.0.1 时代的实现
- * （Apache Harmony 血统），默认只启用 TLS 1.0，而目标服务器最低要求 TLS 1.1；
- * 强行抬高到 TLS 1.2 之后仍然被服务器以 handshake_failure 拒绝。
+ * ## 为什么必须换栈（2026-11-18 实测）
  *
- * Bouncy Castle 是纯 Java 实现的 TLS 1.2 栈，不依赖系统 OpenSSL，
- * 其 android 变体（bcprov-android / bctls-android）支持 API 16+，
- * 是这台电视上跑现代 TLS 的现实方案。
+ * 目标电视是 Android 4.3 / API 18，系统 JSSE 由 OpenSSL 1.0.1 驱动
+ * （Apache Harmony 血统），它**只有 CBC 套件，完全没有 GCM / AEAD / ChaCha20 的实现**。
+ *
+ * 现代服务端（nginx 默认配置、Cloudflare 托管、各类 CDN 线路）往往只开 GCM：
+ *
+ * ```
+ * 电视 ClientHello  →  只带 ECDHE-ECDSA-AES128-SHA 这类 CBC 套件
+ * 服务端 ServerHello →  我一个都不支持 → TLS alert 40 handshake_failure
+ * ```
+ *
+ * 实测对照（同一时刻、同一台机器）：
+ *
+ * | 套件 | cf.wedg.top:1234 | tt.wedg.top:443 |
+ * |---|---|---|
+ * | ECDHE-ECDSA-AES128-SHA (CBC) | 失败 alert 40 | 成功 |
+ * | ECDHE-ECDSA-AES256-SHA (CBC) | 失败 alert 40 | 成功 |
+ * | ECDHE-ECDSA-AES128-GCM-SHA256 | 成功 | 成功 |
+ *
+ * 也就是说：**不是证书问题、不是 TLS 版本问题，是套件实现缺失**。
+ * [forceTls12] 只能抬 `enabledProtocols`，凭空变不出 GCM 实现 ——
+ * 那个年代的系统 JSSE 里根本没有这段代码。
+ *
+ * ## Conscrypt 怎么解决
+ *
+ * Conscrypt 是 Google 把 BoringSSL 包成 JSSE Provider 的库，AAR 里**自带原生库**
+ * （`libconscrypt_jni.so`，armeabi-v7a 1.28MB），官方声明支持 API 9+。
+ * 它不接管系统全局 Provider（那会波及整个进程），而是自己 new 一个 Provider：
+ *
+ * ```kotlin
+ * val provider = Conscrypt.newProvider()
+ * val c = SSLContext.getInstance("TLS", provider)
+ * ```
+ *
+ * 4.3 上它走 `PreKitKatPlatformOpenSSLSocketImplAdapter`（继承 4.3 的
+ * `org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl`），
+ * 这样 `HttpsURLConnection` 和 ExoPlayer 这些按老接口拿 socket 的地方都不用改。
+ *
+ * 换栈之后 GCM / ChaCha20 / TLS 1.3 全都有，上面那个 cf 线路直接能连。
+ *
+ * ## 代价与退路
+ *
+ * APK +约 1.5MB（classes 0.47MB + armeabi-v7a so 1.28MB）。
+ * 万一某个 ROM 上 Conscrypt 原生库加载失败（`UnsatisfiedLinkError`）或者行为异常，
+ * 会**自动退回系统 JSSE**；用户也可以在「设置 → TLS 实现」里手动锁回系统栈
+ * （[TlsImpl.SYSTEM]）—— 老代码路径一条都没删。
  */
 object TlsStack {
 
+    private const val TAG = "TlsStack"
+
+    /** 用户可选的 TLS 实现。 */
+    enum class TlsImpl {
+        /** 优先 Conscrypt，构造失败自动退回系统 JSSE（默认）。 */
+        AUTO,
+
+        /** 强制 Conscrypt；失败就报错，不静默降级（排查用）。 */
+        CONSCRYPT,
+
+        /** 强制系统 JSSE：只有 CBC 套件，新式站点会握手失败。 */
+        SYSTEM,
+    }
+
     /**
-     * 已构造好的 factory 缓存（key = "useBc:trust"）。
+     * 已构造好的 factory 缓存（key = "impl:trust"）。
      *
      * ⚠️ **必须复用同一个 SSLContext**，否则海报墙会慢到没法看：
      *   ① 构造它要把系统 CA 库整个 KeyStore 初始化一遍（4.3 上约 130 张证书），
-     *      `BundledCa.trustManager` 还要再解析 3 张内置 PEM；
+     *      `BundledCa.trustManager` 还要再解析 3 张内置 PEM，
+     *      Conscrypt 还要加载一遍原生库；
      *   ② TLS 会话缓存（SSLSessionContext）挂在 SSLContext 上，
      *      换一个新的就等于放弃 session resumption → 每张图都重新完整握手
      *      （RSA-2048 验签 + ECDHE，1GHz ARM 上纯软件算）。
      */
     private val cache = HashMap<String, SSLSocketFactory>()
 
+    /** 运行时是否真的成功构造过 Conscrypt factory（给设置页显示状态用）。 */
+    @Volatile
+    private var conscryptOk: Boolean? = null
+
+    /** 当前进程里 Conscrypt 可不可用（null = 还没试过）。 */
+    fun conscryptAvailable(): Boolean? = conscryptOk
+
+    // ==================== 实现选择（持久化） ====================
+
+    private const val PREFS = "myembyhub_tls"
+    private const val KEY_IMPL = "impl"
+
+    @Volatile
+    private var pref: TlsImpl = TlsImpl.AUTO
+
+    /** 是否已经从 SharedPreferences 读回过（懒加载，第一次取 factory 时读）。 */
+    @Volatile
+    private var prefLoaded = false
+
     /**
-     * 取 socket factory（按需构造一次，之后复用），返回的已经抬到 TLS 1.2。
+     * 从 SharedPreferences 读回用户选择。
      *
-     * 目前只保留系统 JSSE 一条路：2026-11-03 真机实测 4.3 的系统 JSSE
-     * 用 TLSv1.2 + 内置锚点握手成功，不需要换栈。
+     * 会在 [socketFactory] 里**懒调用**一次，所以不需要在 Application / Activity
+     * 里显式初始化；重复调无害（设置页改完想立刻生效可以直接调）。
+     */
+    fun loadPref(ctx: Context) {
+        val raw = try {
+            ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_IMPL, null)
+        } catch (e: Throwable) {
+            null
+        }
+        pref = when (raw) {
+            "conscrypt" -> TlsImpl.CONSCRYPT
+            "system" -> TlsImpl.SYSTEM
+            else -> TlsImpl.AUTO
+        }
+        prefLoaded = true
+    }
+
+    fun pref(): TlsImpl = pref
+
+    /** 改实现并清缓存（缓存里存的是旧栈造出来的 factory，必须作废）。 */
+    fun setPref(ctx: Context, impl: TlsImpl) {
+        pref = impl
+        try {
+            ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(
+                    KEY_IMPL,
+                    when (impl) {
+                        TlsImpl.CONSCRYPT -> "conscrypt"
+                        TlsImpl.SYSTEM -> "system"
+                        TlsImpl.AUTO -> "auto"
+                    }
+                ).commit()
+        } catch (ignored: Throwable) {
+        }
+        synchronized(cache) { cache.clear() }
+    }
+
+    /**
+     * 取 socket factory（按需构造一次，之后复用）。
      *
-     * @param useBc 保留参数：若将来真要接 Bouncy Castle，这里是入口
      * @param trust 信任模式
+     * @param impl 实现覆盖；默认用 [pref] 里存的那个
      */
     fun socketFactory(
         ctx: Context,
-        useBc: Boolean,
-        trust: TrustMode
+        trust: TrustMode,
+        impl: TlsImpl? = null
     ): SSLSocketFactory? {
-        val key = "$useBc:$trust"
+        if (!prefLoaded) loadPref(ctx)
+        val use = impl ?: pref
+        val key = "$use:$trust"
         synchronized(cache) { cache[key]?.let { return it } }
-        val built = build(ctx, useBc, trust) ?: return null
-        val raised = forceTls12(built)
-        synchronized(cache) { cache[key] = raised }
-        return raised
+        val built = build(ctx, trust, use) ?: return null
+        // Conscrypt 自带 1.2/1.3，不需要抬协议；系统栈要抬（4.3 默认只开 TLS 1.0）
+        val ready = if (use == TlsImpl.CONSCRYPT) built else forceTls12(built)
+        synchronized(cache) { cache[key] = ready }
+        return ready
     }
 
     private fun build(
         ctx: Context,
-        useBc: Boolean,
-        trust: TrustMode
+        trust: TrustMode,
+        impl: TlsImpl
     ): SSLSocketFactory? {
         val tm: TrustManager = when (trust) {
             TrustMode.ALL -> trustAll()
             TrustMode.BUNDLED -> BundledCa.trustManager(ctx)
         }
-        return try {
-            if (useBc) {
-                val provider = bouncyCastleProvider() ?: return null
-                val c = SSLContext.getInstance("TLS", provider)
-                c.init(null, arrayOf(tm), SecureRandom())
-                c.socketFactory as SSLSocketFactory
-            } else {
-                val c = SSLContext.getInstance("TLS")
-                c.init(null, arrayOf(tm), SecureRandom())
-                c.socketFactory as SSLSocketFactory
+        if (impl != TlsImpl.SYSTEM) {
+            conscrypt(tm)?.let {
+                // 成功也记一行：这台电视没法截图，TLS 到底走的哪条路
+                // 只能靠 logcat 认（`adb logcat -s TlsStack`）。
+                if (conscryptOk != true) Log.i(TAG, "TLS 使用 Conscrypt（GCM/ChaCha20 可用）")
+                conscryptOk = true
+                return it
             }
+            conscryptOk = false
+            if (impl == TlsImpl.CONSCRYPT) {
+                Log.w(TAG, "强制 Conscrypt 但构造失败")
+                return null
+            }
+            Log.i(TAG, "Conscrypt 不可用，退回系统 JSSE（只有 CBC 套件）")
+        }
+        return try {
+            val c = SSLContext.getInstance("TLS")
+            c.init(null, arrayOf(tm), SecureRandom())
+            c.socketFactory as SSLSocketFactory
         } catch (e: Throwable) {
             null
         }
     }
 
     /**
-     * BC 的 provider。
+     * 用 Conscrypt 的 Provider 单独构造一个 SSLContext。
      *
-     * 注意：Maven Central 上的 `bctls-jdk15on` 把 JSSE provider 类放在
-     * `META-INF/versions/9/`（Java 9+ 多版本 jar），D8 在 API 18 上取不到，
-     * 且没有 `-android` 变体。因此默认不启用，留作将来手动改造时的入口。
+     * ⚠️ **不要把它 install 成全局 Provider**：那会替换掉整个进程的 JSSE
+     * （包括系统安装器、WebView 之类的既有实现），在老 ROM 上风险太大。
+     * 这里只让本 App 自己 new 出来的 SSLContext 用它，作用域干净。
+     *
+     * 全部走反射的原因：万一某个 ABI 上原生库缺失，
+     * `UnsatisfiedLinkError` 会在类初始化/调用时抛出，反射能完整兜住，
+     * 而不是在类校验阶段就炸掉整个 TlsStack。
      */
-    private fun bouncyCastleProvider(): java.security.Provider? {
+    private fun conscrypt(tm: TrustManager): SSLSocketFactory? {
         return try {
-            val cls = Class.forName("org.bouncycastle.jsse.provider.BouncyCastleProvider")
-            val p = cls.getDeclaredConstructor().newInstance() as java.security.Provider
-            val existing = java.security.Security.getProvider(p.name)
-            if (existing != null) existing
-            else {
-                java.security.Security.insertProviderAt(p, 1)
-                p
-            }
+            val cls = Class.forName("org.conscrypt.Conscrypt")
+            val provider = cls.getMethod("newProvider").invoke(null) as java.security.Provider
+            val c = SSLContext.getInstance("TLS", provider)
+            c.init(null, arrayOf(tm), SecureRandom())
+            c.socketFactory as SSLSocketFactory
         } catch (e: Throwable) {
+            Log.w(TAG, "Conscrypt 构造失败: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -195,6 +320,21 @@ object TlsStack {
      */
     fun applyServerName(socket: SSLSocket, host: String) {
         if (host.isEmpty()) return
+
+        // ⓪ Conscrypt 自己建出来的 socket —— 它有专门的入口，
+        //    走它才能把名字同时用于 SNI 和**证书主机名校验**
+        //    （换栈之后 leaf 证书的 CN/SAN 校验也归 Conscrypt 管，不能漏）。
+        try {
+            val cls = Class.forName("org.conscrypt.Conscrypt")
+            if (cls.getMethod("isConscrypt", javax.net.ssl.SSLSocket::class.java)
+                    .invoke(null, socket) == true
+            ) {
+                cls.getMethod("setHostname", javax.net.ssl.SSLSocket::class.java, String::class.java)
+                    .invoke(null, socket, host)
+                return
+            }
+        } catch (ignored: Throwable) {
+        }
 
         // ① API 24+：SSLParameters.setServerNames
         try {

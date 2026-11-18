@@ -451,7 +451,7 @@ class UpdateManager(private val ctx: Context) {
     private fun openHttp(url: String): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         if (conn is javax.net.ssl.HttpsURLConnection) {
-            conn.sslSocketFactory = TlsStack.socketFactory(ctx, false, TrustMode.ALL)
+            conn.sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.ALL)
                 ?: throw java.io.IOException("无法构造 TLS socket factory")
         }
         conn.connectTimeout = CONNECT_TIMEOUT

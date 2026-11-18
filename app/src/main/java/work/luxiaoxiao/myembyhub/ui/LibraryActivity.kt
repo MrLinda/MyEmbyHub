@@ -611,23 +611,23 @@ class LibraryActivity : Activity() {
 
     /** 手机扫码搜索。 */
     private fun startPhoneSearch() {
-        if (phoneServer != null) {
-            showQrDialog(PhoneControlServer.MODE_SEARCH)
-            return
+        // 同上：服务可能已经在 10 分钟上限自己关掉了，那时 `!= null` 判断会骗人，
+        // 弹出来的二维码指向一个没人监听的端口
+        if (phoneServer?.isRunning != true) {
+            phoneServer = PhoneControlServer(
+                this,
+                mode = PhoneControlServer.MODE_SEARCH,
+                onLogin = { _, _, _, _ -> },
+                onSearch = { term ->
+                    main.post {
+                        runSearch(term)
+                        toast("已收到搜索：$term")
+                    }
+                },
+                onFail = { msg -> main.post { toast(msg) } }
+            )
+            phoneServer?.start()
         }
-        phoneServer = PhoneControlServer(
-            this,
-            mode = PhoneControlServer.MODE_SEARCH,
-            onLogin = { _, _, _, _ -> },
-            onSearch = { term ->
-                main.post {
-                    runSearch(term)
-                    toast("已收到搜索：$term")
-                }
-            },
-            onFail = { msg -> main.post { toast(msg) } }
-        )
-        phoneServer?.start()
         showQrDialog(PhoneControlServer.MODE_SEARCH)
     }
 

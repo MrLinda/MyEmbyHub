@@ -102,6 +102,17 @@ android {
         targetSdk = 23
         multiDexEnabled = true
 
+        // 只保留目标设备用得到的 ABI。
+        //
+        // Conscrypt 的 AAR 里塞了 4 份原生库：armeabi-v7a 1.28MB、x86 2.25MB、
+        // x86_64 2.50MB、arm64-v8a 2.10MB。电视是 armeabi-v7a（MStar 方案），
+        // 其余三份纯粹白占 6.8MB 安装包体积 —— 这台机器存储只有 3.3GB 可用。
+        //
+        // 模拟器（LeTV AVD / sdk_x86）也是 x86，调试要用，所以两个都留。
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "x86")
+        }
+
         // GitHub 仓库（`owner/repo`），在线更新的主来源。
         // 取值的优先级见文件末尾 updateRepo 那段；空串表示「不用 GitHub」，
         // UpdateManager 会退回本机静态服务（局域网调试用）。
@@ -195,6 +206,21 @@ dependencies {
 
     // 二维码生成（纯 Java 库，API 18 可用）
     implementation(libs.zxing.core)
+
+    // Conscrypt：**唯一为 4.3 补出现代 TLS 套件的方案**。
+    //
+    // 背景（实测见 net/TlsStack.kt 注释）：4.3 的系统 JSSE 由 OpenSSL 1.0.1 驱动，
+    // 只有 CBC 套件、没有任何 GCM/AEAD 实现。服务端如果只开 GCM
+    // （现代 nginx / Cloudflare 的默认配置），握手直接 alert 40 handshake_failure，
+    // 客户端再怎么抬 enabledProtocols 也没用 —— 那是**实现里没有**，不是配置问题。
+    //
+    // Conscrypt 把一套 BoringSSL 塞进 APK（JNI），从此 GCM / ChaCha20 / TLS1.3 全都有，
+    // 官方声明支持 API 9+，AAR 里带 armeabi-v7a 原生库（1.28MB）。
+    //
+    // ⚠️ 体积代价：只保留 armeabi-v7a 后大约 +1.5MB（classes + so），
+    //    电视 app 堆 96MB、APK 原本 2.2MB，这个涨幅可以接受；
+    //    不裁 ABI 的话 AAR 里还有 arm64-v8a 2.1MB + x86 2.25MB + x86_64 2.5MB 白搭进去。
+    implementation(libs.conscrypt.android)
 
     // 单元测试：目前只有 UrlKit 的回归测试（手写 URL / 重定向解析）
     testImplementation(libs.junit)

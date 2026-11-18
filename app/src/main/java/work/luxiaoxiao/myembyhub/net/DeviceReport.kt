@@ -242,7 +242,7 @@ object DeviceReport {
      */
     private fun collectTls(ctx: Context, host: String): Tls {
         val defaultProtocols = try {
-            val f = TlsStack.socketFactory(ctx, false, TrustMode.ALL)
+            val f = TlsStack.socketFactory(ctx, TrustMode.ALL)
             val s = f?.createSocket() as? SSLSocket
             val p = s?.enabledProtocols?.toList() ?: emptyList()
             try { s?.close() } catch (ignored: Throwable) {}
@@ -251,7 +251,7 @@ object DeviceReport {
             emptyList()
         }
         val cipherCount = try {
-            TlsStack.socketFactory(ctx, false, TrustMode.ALL)?.supportedCipherSuites?.size ?: 0
+            TlsStack.socketFactory(ctx, TrustMode.ALL)?.supportedCipherSuites?.size ?: 0
         } catch (ignored: Throwable) {
             0
         }
@@ -283,7 +283,7 @@ object DeviceReport {
         var raw: Socket? = null
         var ssl: SSLSocket? = null
         try {
-            val factory = TlsStack.socketFactory(ctx, false, trust)
+            val factory = TlsStack.socketFactory(ctx, trust)
                 ?: return Handshake(host, withSni, false, "", "", "", "", 0, tag, 0, "拿不到 socket factory")
             raw = Socket()
             raw.connect(InetSocketAddress(host, 443), TLS_PROBE_TIMEOUT)
@@ -472,7 +472,7 @@ object DeviceReport {
             // 生产环境一定是 https；本地联调（http://10.0.2.2:端口）也得能跑，
             // 所以这里按协议分流，不硬转 HttpsURLConnection。
             if (conn is HttpsURLConnection) {
-                conn.sslSocketFactory = TlsStack.socketFactory(ctx, false, TrustMode.ALL)
+                conn.sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.ALL)
                     ?: throw IOException("无法构造 TLS socket factory")
             }
             conn.requestMethod = "POST"

@@ -481,7 +481,7 @@ class EmbyApi(
     private fun open(url: String, method: String): java.net.HttpURLConnection {
         val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
         if (conn is HttpsURLConnection) {
-            conn.sslSocketFactory = TlsStack.socketFactory(ctx, false, TrustMode.BUNDLED)
+            conn.sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
                 ?: throw java.io.IOException("无法构造 TLS socket factory")
         }
         conn.connectTimeout = 10000
@@ -563,7 +563,11 @@ fun friendlyError(e: Throwable): String {
             "连接服务器超时，检查网络"
         msg.contains("SSL", ignoreCase = true) ||
             msg.contains("handshake", ignoreCase = true) ->
-            "安全连接失败，检查服务器地址和网络"
+            // ⚠️ 这句要带上「换 TLS 实现」这条出路：
+            //    这条路径上最常见的成因**不是证书**，而是 4.3 的系统 JSSE
+            //    没有 GCM 套件（见 TlsStack 的注释）。用户在设置里切一次
+            //    TLS 实现就能连上，光说「检查服务器地址和网络」只会让他白折腾。
+            "安全连接失败（多因系统 TLS 太老），可到设置 → TLS 实现改用 Conscrypt"
         msg.contains("Connection refused", ignoreCase = true) ->
             "服务器拒绝连接"
         msg.contains("failed to connect", ignoreCase = true) ->

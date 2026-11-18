@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    登录页二维码列的次按钮（「刷新二维码」）。
+
+    ⚠️ 为什么不用 `bg_dialog_btn_secondary`：那个的焦点态只是把底抬到
+       `surface_pressed`（比面板亮一点点），在 55 寸电视上三米外看**根本没有焦点感** ——
+       实测截图里按到它和没按到它几乎一模一样，用户会以为遥控器失灵。
+       弹窗里能用是因为弹窗本身小、旁边还有别的按钮做对比；登录页只有这一个按钮，
+       必须按顶栏/详情页那套「焦点 = 暖色描边」来。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_pressed" />
+            <stroke
+                android:width="2dp"
+                android:color="@color/focus_border" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_pressed" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/stroke_subtle" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

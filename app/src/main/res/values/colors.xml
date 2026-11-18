@@ -136,6 +136,8 @@
     <color name="content_accent">@color/accent_primary</color>
     <!-- 压在强调色实心底上的文字（主按钮聚焦时） -->
     <color name="content_on_accent">@color/palette_ink_900</color>
+    <!-- 压在反相底（纯白，二维码那块）上的文字：白底必须写深色 -->
+    <color name="content_on_inverse">@color/palette_ink_900</color>
     <color name="content_error">@color/palette_red_400</color>
 
     <!-- 描边 / 分隔线 -->

@@ -429,7 +429,7 @@ class EmbyHttpDataSource(
     /** 建立（TLS）连接。http 走明文，https 走系统 JSSE + 内置锚点。 */
     private fun openSocket(u: UrlKit.Parts, host: String, port: Int): Socket {
         if (u.scheme == "https") {
-            val factory = TlsStack.socketFactory(ctx, false, TrustMode.BUNDLED)
+            val factory = TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
                 ?: throw IOException("无法构造 TLS socket factory")
             // ⚠️ 只包 factory；这里拿到的是**真 socket**，直接设协议即可
             val ssl = factory.createSocket() as SSLSocket

@@ -1,159 +1,274 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+    登录页。
+
+    ⚠️ 这一页叫**登录页**，首页是 HomeActivity（顶栏 + 横滑行），别混。
+
+    它只干一件事：把「输入账号密码」挪到手机上。所以**进来就是扫码界面** ——
+    手机登录服务跟着页面一起启动，二维码立刻画出来，不需要先点一个「扫码登录」按钮
+    （遥控器上多按一次纯粹是门槛，而且那个按钮以前还得先被找到、先被聚焦）。
+
+    视觉语言跟 `tv_dialog.xml` / `tv_menu_dialog.xml` 一套：
+    深色圆角面板 + 暖色竖条标题 + 细分隔线 + 描边/实心按钮。
+
+    ⚠️ 别再用系统 `Button`：4.3 上它是 Holo 蓝底九宫格 + 自带内边距，
+       跟这套暖色语言完全两套，看着像「塞进来的系统控件」。
+       → 按钮一律 `TextView` + `bg_dialog_btn` / `bg_login_btn_secondary`，
+         文字色走 `dialog_btn_text*` 这两个 selector（焦点时自动反色）。
+
+    ⚠️ 左侧那个次按钮用的是 `bg_login_btn_secondary` 而**不是** `bg_dialog_btn_secondary`：
+       后者焦点态只是把底抬到 `surface_pressed`，在 55 寸电视上三米外根本看不出焦点在哪儿
+       （弹窗里能用是因为面板小、旁边总有别的按钮做对比；这一页只有它一个按钮）。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="horizontal"
-    android:padding="36dp"
     android:background="@color/surface_base">
 
-    <!-- 左侧：电视端直接输入 -->
     <LinearLayout
-        android:layout_width="0dp"
-        android:layout_weight="1"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center_vertical"
-        android:paddingRight="32dp">
+        android:layout_width="980dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/bg_dialog_panel"
+        android:orientation="vertical">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- 标题行：跟弹窗面板完全同款（暖色竖条 + 标题 + 一句说明） -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/login_title"
-            style="@style/TvTitle"
-            android:textSize="26sp"
-            android:layout_marginBottom="6dp" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingLeft="28dp"
+            android:paddingTop="18dp"
+            android:paddingRight="28dp"
+            android:paddingBottom="14dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="这台电视没有软键盘，推荐用手机扫码登录"
-            style="@style/TvSubtitle"
-            android:layout_marginBottom="22dp" />
+            <View
+                android:layout_width="4dp"
+                android:layout_height="20dp"
+                android:background="@color/indicator_bar" />
 
-        <EditText
-            android:id="@+id/et_server"
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="12dp"
+                android:text="@string/login_title"
+                android:textColor="@color/content_primary"
+                android:textSize="21sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="18dp"
+                android:text="@string/login_subtitle"
+                android:textColor="@color/content_secondary"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <View
             android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:hint="@string/hint_server"
-            android:inputType="textUri"
-            android:singleLine="true"
-            android:textColor="@color/content_primary"
-            android:textColorHint="@color/content_secondary"
-            android:background="@drawable/bg_card"
-            android:paddingLeft="14dp"
-            android:paddingRight="14dp"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:nextFocusDown="@+id/et_user" />
-
-        <EditText
-            android:id="@+id/et_user"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginTop="12dp"
-            android:hint="@string/hint_user"
-            android:inputType="text"
-            android:singleLine="true"
-            android:textColor="@color/content_primary"
-            android:textColorHint="@color/content_secondary"
-            android:background="@drawable/bg_card"
-            android:paddingLeft="14dp"
-            android:paddingRight="14dp"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:nextFocusUp="@+id/et_server"
-            android:nextFocusDown="@+id/et_pass" />
-
-        <EditText
-            android:id="@+id/et_pass"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginTop="12dp"
-            android:hint="@string/hint_password"
-            android:inputType="textPassword"
-            android:singleLine="true"
-            android:textColor="@color/content_primary"
-            android:textColorHint="@color/content_secondary"
-            android:background="@drawable/bg_card"
-            android:paddingLeft="14dp"
-            android:paddingRight="14dp"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:nextFocusUp="@+id/et_user"
-            android:nextFocusDown="@+id/btn_login" />
+            android:layout_height="1dp"
+            android:background="@color/stroke_subtle" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:layout_marginTop="22dp">
+            android:paddingLeft="24dp"
+            android:paddingTop="20dp"
+            android:paddingRight="24dp"
+            android:paddingBottom="4dp">
 
-            <Button
-                android:id="@+id/btn_login"
-                android:layout_width="150dp"
-                android:layout_height="46dp"
-                android:text="@string/btn_login"
-                android:textSize="16sp"
-                android:focusable="true"
-                android:nextFocusUp="@+id/et_pass"
-                android:nextFocusRight="@+id/btn_qr_login" />
+            <!-- ==================== 左：二维码（默认视图） ==================== -->
+            <LinearLayout
+                android:layout_width="360dp"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
 
-            <Button
-                android:id="@+id/btn_qr_login"
-                android:layout_width="200dp"
-                android:layout_height="46dp"
-                android:layout_marginStart="16dp"
-                android:text="手机扫码登录"
-                android:textSize="16sp"
-                android:focusable="true"
-                android:nextFocusLeft="@+id/btn_login"
-                android:nextFocusRight="@+id/img_qr" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:text="@string/login_qr_hint"
+                    style="@style/TvSubtitle" />
 
+                <!--
+                    白底是硬约束（见 colors.xml 的 qrcode_backdrop）：
+                    扫码靠对比度，换成深色底识别率会掉。
+                    里面的占位文字必须用 `content_on_inverse` —— 白底上写
+                    content_primary（浅灰）等于没写。
+                -->
+                <FrameLayout
+                    android:layout_width="280dp"
+                    android:layout_height="280dp"
+                    android:background="@color/qrcode_backdrop">
+
+                    <ImageView
+                        android:id="@+id/img_qr"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:padding="10dp"
+                        android:contentDescription="@string/login_qr_title" />
+
+                    <TextView
+                        android:id="@+id/tv_qr_placeholder"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:padding="24dp"
+                        android:text="@string/login_qr_creating"
+                        android:textColor="@color/content_on_inverse"
+                        android:textSize="15sp" />
+                </FrameLayout>
+
+                <!-- 二维码下面那行网址：扫码失败时靠它在手机浏览器里手动打开 -->
+                <TextView
+                    android:id="@+id/tv_qr_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:ellipsize="end"
+                    android:gravity="center"
+                    android:maxLines="2"
+                    android:textColor="@color/content_secondary"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/btn_qr_refresh"
+                    android:layout_width="wrap_content"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="14dp"
+                    android:background="@drawable/bg_login_btn_secondary"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:gravity="center"
+                    android:minWidth="180dp"
+                    android:paddingLeft="24dp"
+                    android:paddingRight="24dp"
+                    android:singleLine="true"
+                    android:text="@string/login_qr_refresh"
+                    android:textColor="@color/dialog_btn_text_secondary"
+                    android:textSize="16sp"
+                    android:nextFocusRight="@+id/et_server" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="1dp"
+                android:layout_height="300dp"
+                android:layout_gravity="center_vertical"
+                android:layout_marginLeft="28dp"
+                android:layout_marginRight="28dp"
+                android:background="@color/stroke_subtle" />
+
+            <!-- ==================== 右：电视端直接输入（兜底） ==================== -->
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center_vertical"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/login_form_title"
+                    android:textColor="@color/content_secondary"
+                    android:textSize="14sp" />
+
+                <EditText
+                    android:id="@+id/et_server"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_dialog_input"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:hint="@string/hint_server"
+                    android:inputType="textUri"
+                    android:paddingLeft="14dp"
+                    android:paddingRight="14dp"
+                    android:singleLine="true"
+                    android:textColor="@color/content_primary"
+                    android:textColorHint="@color/content_secondary"
+                    android:textSize="16sp"
+                    android:nextFocusLeft="@+id/btn_qr_refresh"
+                    android:nextFocusDown="@+id/et_user" />
+
+                <EditText
+                    android:id="@+id/et_user"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_dialog_input"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:hint="@string/hint_user"
+                    android:inputType="text"
+                    android:paddingLeft="14dp"
+                    android:paddingRight="14dp"
+                    android:singleLine="true"
+                    android:textColor="@color/content_primary"
+                    android:textColorHint="@color/content_secondary"
+                    android:textSize="16sp"
+                    android:nextFocusUp="@+id/et_server"
+                    android:nextFocusDown="@+id/et_pass" />
+
+                <EditText
+                    android:id="@+id/et_pass"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_dialog_input"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:hint="@string/hint_password"
+                    android:inputType="textPassword"
+                    android:paddingLeft="14dp"
+                    android:paddingRight="14dp"
+                    android:singleLine="true"
+                    android:textColor="@color/content_primary"
+                    android:textColorHint="@color/content_secondary"
+                    android:textSize="16sp"
+                    android:nextFocusUp="@+id/et_user"
+                    android:nextFocusDown="@+id/btn_login" />
+
+                <TextView
+                    android:id="@+id/btn_login"
+                    android:layout_width="wrap_content"
+                    android:layout_height="50dp"
+                    android:layout_marginTop="20dp"
+                    android:background="@drawable/bg_dialog_btn"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:gravity="center"
+                    android:minWidth="180dp"
+                    android:paddingLeft="32dp"
+                    android:paddingRight="32dp"
+                    android:singleLine="true"
+                    android:text="@string/btn_login"
+                    android:textColor="@color/dialog_btn_text"
+                    android:textSize="18sp"
+                    android:nextFocusUp="@+id/et_pass"
+                    android:nextFocusLeft="@+id/btn_qr_refresh" />
+            </LinearLayout>
         </LinearLayout>
 
+        <!-- 状态行：正在等扫码 / 手机登录失败 / 已在电视上提交 -->
         <TextView
             android:id="@+id/tv_status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="18dp"
+            android:lineSpacingExtra="3dp"
+            android:paddingLeft="28dp"
+            android:paddingTop="12dp"
+            android:paddingRight="28dp"
+            android:paddingBottom="22dp"
             android:textColor="@color/content_secondary"
             android:textSize="15sp" />
-
     </LinearLayout>
 
-    <!-- 右侧：二维码面板 -->
-    <LinearLayout
-        android:id="@+id/panel_qr"
-        android:layout_width="0dp"
-        android:layout_weight="1"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center"
-        android:visibility="gone">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="用手机相机 / 微信扫一扫"
-            style="@style/TvSubtitle"
-            android:layout_marginBottom="12dp" />
-
-        <ImageView
-            android:id="@+id/img_qr"
-            android:layout_width="320dp"
-            android:layout_height="320dp"
-            android:background="@color/qrcode_backdrop"
-            android:padding="8dp"
-            android:focusable="true"
-            android:contentDescription="登录二维码" />
-
-        <TextView
-            android:id="@+id/tv_qr_url"
-            style="@style/TvSubtitle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp" />
-
-    </LinearLayout>
-
-</LinearLayout>
+</FrameLayout>

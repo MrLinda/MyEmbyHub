@@ -3,6 +3,18 @@
     <string name="app_name">MyEmbyHub</string>
 
     <string name="login_title">连接 Emby 服务器</string>
+    <string name="login_subtitle">电视没有软键盘，扫码最省事</string>
+    <string name="login_qr_title">登录二维码</string>
+    <string name="login_qr_hint">用手机相机 / 微信扫一扫</string>
+    <string name="login_qr_creating">正在生成二维码…</string>
+    <string name="login_qr_refresh">刷新二维码</string>
+    <string name="login_qr_waiting">请在手机上扫码，输入账号密码后电视会自动进入媒体库</string>
+    <string name="login_qr_no_ip">拿不到电视的局域网 IP</string>
+    <string name="login_qr_no_ip_tip">拿不到电视的局域网 IP —— 先确认电视已经连上 WiFi</string>
+    <string name="login_qr_encode_failed">二维码生成失败，请在手机浏览器里手动打开下面这个地址</string>
+    <string name="login_qr_expired">二维码已过期</string>
+    <string name="login_qr_expired_tip">二维码只活 10 分钟（防止端口一直开着），请按「刷新二维码」重新生成</string>
+    <string name="login_form_title">也可以直接在电视上输入</string>
     <string name="hint_server">服务器地址</string>
     <string name="hint_user">用户名</string>
     <string name="hint_password">密码</string>
@@ -16,4 +28,9 @@
     <string name="back_hint">按「返回」退出</string>
 
     <string name="player_title">正在播放</string>
+
+    <!-- 视频轨超出本机硬解能力（多为 4K / 高位深 HEVC）。
+         %1$s 是规格串，形如「hvc1.1.6.L153.90 / 3840×2160」。
+         ⚠️ 必须说清「音频没问题、是画面出不来」，否则用户会以为是网络卡了。 -->
+    <string name="player_video_unsupported">这台电视解不了这个视频画面\n\n规格：%1$s\n\n这台机器的硬解上限是 1080p，4K（尤其 HEVC）会卡在解码上：\n声音正常、进度条也在走，但画面出不来。\n\n换 1080p 的片源，或让服务器把这一集转码后再看。</string>
 </resources>

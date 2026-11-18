@@ -220,7 +220,7 @@ class ImageLoader private constructor(private val ctx: Context) {
                 setRequestProperty("X-Emby-Token", Session.get(ctx).token)
                 if (this is javax.net.ssl.HttpsURLConnection) {
                     // ⚠️ 同一个坑：必须抬到 TLS1.2，否则连不上（factory 已由 TlsStack 缓存复用）
-                    sslSocketFactory = TlsStack.socketFactory(ctx, false, TrustMode.BUNDLED)
+                    sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
                         ?: return null
                 }
             }
