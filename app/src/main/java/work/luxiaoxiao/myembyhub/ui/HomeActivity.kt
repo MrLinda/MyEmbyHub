@@ -35,6 +35,7 @@ import work.luxiaoxiao.myembyhub.net.PhoneControlServer
 import work.luxiaoxiao.myembyhub.net.QrUtil
 import work.luxiaoxiao.myembyhub.net.Session
 import work.luxiaoxiao.myembyhub.net.SortOption
+import work.luxiaoxiao.myembyhub.net.TlsHostMemory
 import work.luxiaoxiao.myembyhub.net.TlsStack
 import work.luxiaoxiao.myembyhub.net.friendlyError
 import java.util.concurrent.Executors
@@ -274,6 +275,25 @@ class HomeActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
+    /**
+     * 首页各行的取数线程池，**两路**。
+     *
+     * 为什么要单独开一个：`worker` 是单线程的，上面还排着登录态、媒体库清单、
+     * 图片元数据这些活儿；首页五个库要是塞进同一个队列里，那就是纯串行。
+     * 这里只服务「按库取 20 条」这一件事，最多同时两路 ——
+     * MStar 双核 1GHz，再多开也只是互相抢，而且这台电视挂不住三四个响应体。
+     */
+    private val rowPool = Executors.newFixedThreadPool(2)
+
+    /**
+     * 首页的「代」。每次 [loadHome] 自增，回调里对不上就整块丢弃。
+     *
+     * 播完片回首页会再调一次 loadHome，两次的响应可能交叉回来 ——
+     * 没有这个守卫的话，老的一代会把新的那批行又追加一遍，
+     * 屏幕上会出现两排同一个库。
+     */
+    private var homeGeneration = 0
+
     /** 媒体库清单（首页和媒体库页共用一份，避免取两遍）。 */
     private var libraries: List<MediaItem> = emptyList()
 
@@ -454,8 +474,14 @@ class HomeActivity : Activity() {
      *
      * 旧页面不立刻隐藏：等新页面自己把内容准备好（[revealPage]）再换，
      * 否则中间那段「取数中」用户看到的是整屏空白。
+     *
+     * @param libraryTarget 切到媒体库页时要选中的库序号；-1 = 用当前的 [libIndex]。
+     *        「更多 ›」用它一次把「切页 + 选中指定库」做完 —— 早期做法是
+     *        `switchTab(1)` 之后再补一次 `selectLibrary`，两次都拉一遍同一个库的
+     *        第一页，后回来的那次 `submit()` 会把已经拿到焦点的那张卡 detach 掉，
+     *        焦点被框架甩到「排序」那颗 chip 上（实测）。
      */
-    private fun switchTab(index: Int) {
+    private fun switchTab(index: Int, libraryTarget: Int = -1) {
         if (index !in 0..2) return
         tabIndex = index
         for (i in navItems.indices) navItems[i].isSelected = i == index
@@ -464,7 +490,14 @@ class HomeActivity : Activity() {
         showPage(index)
         when (index) {
             0 -> if (pageReady[0]) revealPage(0) else loadHome(focusFirst = false)
-            1 -> loadLibraryPageIfNeeded()
+            1 -> if (libraryTarget >= 0) {
+                // 指定了库：跳过 loadLibraryPageIfNeeded 的「选当前库」，
+                // 免得同一个库被拉两遍（见 KDoc）。左栏 tab 还没建就先建出来。
+                if (libTabs.isEmpty()) buildLibTabs()
+                selectLibrary(libraryTarget, focusGrid = true)
+            } else {
+                loadLibraryPageIfNeeded()
+            }
             2 -> revealPage(2)
         }
     }
@@ -515,27 +548,40 @@ class HomeActivity : Activity() {
     /**
      * 取首页数据：继续观看 + 每个库最新若干条。
      *
-     * **到一行画一行**：串行取五六个库，全部取完再画的话首屏要空白十几秒
-     * （实测 24s）。改成每取完一块就 `post` 上去，3 秒就能看到第一行。
+     * **到一行画一行**：全部取完再画的话首屏要空白十几秒（实测 24s）。
+     * 每取完一块就 `post` 上去，3 秒就能看到第一行。
+     *
+     * 各库之间**两路并发**（[rowPool]），但**放行顺序仍按库的原始顺序** ——
+     * 否则每次进首页各行上下位置都会变。详见循环里的注释。
      */
     private fun loadHome(focusFirst: Boolean) {
         showLoading(true)
         homePendingReset = true
         pageReady[0] = false
+        // 每次重新取首页都换一代；老一代的回调回来时直接丢掉
+        // （播完回来会再调一次 loadHome，两次的图片/行不能混在一起）
+        val gen = ++homeGeneration
 
         worker.execute {
             val resumeResult = api.resume(ROW_LIMIT)
+            if (gen != homeGeneration) return@execute
             val resumeItems = resumeResult.getOrNull().orEmpty()
             if (resumeItems.isNotEmpty()) {
-                main.post { appendSection(Section(getString(R.string.home_resume), "", resumeItems)) }
+                main.post {
+                    if (gen == homeGeneration) {
+                        appendSection(Section(getString(R.string.home_resume), "", resumeItems))
+                    }
+                }
             }
 
             val libsResult = api.libraries()
+            if (gen != homeGeneration) return@execute
             val libs = libsResult.getOrNull().orEmpty()
             libraries = libs
             if (libs.isEmpty()) {
                 val err = libsResult.exceptionOrNull()
                 main.post {
+                    if (gen != homeGeneration) return@post
                     showLoading(false)
                     // 提示语三页共用，别把用户当前所在页的提示覆盖掉
                     // ⚠️ 文案记在**首页**名下（page = 0），不是记在「当前 tab」名下：
@@ -551,37 +597,76 @@ class HomeActivity : Activity() {
                 return@execute
             }
 
-            var drawn = 0
-            for (lib in libs.take(MAX_LIBRARY_ROWS)) {
-                val r = api.items(
-                    lib.id,
-                    recursive = true,
-                    limit = ROW_LIMIT,
-                    sortBy = SortOption.SORT_DATE_CREATED,
-                    descending = true,
-                    includeItemTypes = POSTER_TYPES
-                )
-                val items = r.getOrNull().orEmpty()
-                if (items.isNotEmpty()) {
-                    drawn++
-                    main.post { appendSection(Section(lib.name, lib.id, items)) }
-                }
-            }
+            // ⚠️ 每个库各取 20 条，**两路并发**（2026-11-19 改）。
+            //
+            // 原来是串行 for 循环：五六个库 = 五六次「建连 + TLS + 等响应」。
+            // 这台机器一次完整握手实测 1.1~3.6 秒（见 docs/tv-device-report），
+            // 串起来首屏要十几秒，用户感受就是「打开就卡住」。
+            // 并发之后最慢的那一路决定总时长，首屏大约快一半。
+            //
+            // 为什么只开两路：MStar 双核 1GHz，再多人也只是互相抢 CPU 和带宽，
+            // 而且这台电视的内存只够同时挂两三个响应体。
+            val rows = libs.take(MAX_LIBRARY_ROWS)
+            val results = arrayOfNulls<List<MediaItem>>(rows.size)
+            val lock = Any()
+            var cursor = 0
+            var drawnCount = 0
+            val remaining = java.util.concurrent.atomic.AtomicInteger(rows.size)
 
-            main.post {
-                showLoading(false)
-                if (drawn == 0 && resumeItems.isEmpty()) {
-                    showHint(getString(R.string.home_empty), 0)
-                }
-                revealPage(0)
-                // ⚠️ 只有「用户还在首页」时才把焦点抓去第一张卡。
-                //    取数要十几秒，这期间用户很可能已经切到媒体库/搜索页了 ——
-                //    无条件 requestFocus 会把焦点从顶栏抢到一个 GONE 的页面里，
-                //    结果是整屏没有任何高亮、方向键全部失效（实测踩过）。
-                if (focusFirst && tabIndex == 0) {
-                    focusHomeFirstCard(force = true)
-                } else if (tabIndex == 0) {
-                    restoreHomeFocus()
+            for (i in rows.indices) {
+                rowPool.execute {
+                    val lib = rows[i]
+                    val r = api.items(
+                        lib.id,
+                        recursive = true,
+                        limit = ROW_LIMIT,
+                        sortBy = SortOption.SORT_DATE_CREATED,
+                        descending = true,
+                        includeItemTypes = POSTER_TYPES
+                    )
+                    val items = r.getOrNull().orEmpty()
+                    synchronized(lock) {
+                        results[i] = items
+                        // **严格按库的顺序放行**：先到的不能跳队。
+                        // 否则每次进首页，各行的上下位置都会变（哪个库先回来哪个在上面），
+                        // 用户熟悉的「第三排是电影」就没了。
+                        while (cursor < results.size && results[cursor] != null) {
+                            val idx = cursor
+                            val sec = results[idx].orEmpty()
+                            results[idx] = null
+                            cursor++
+                            if (sec.isNotEmpty()) {
+                                drawnCount++
+                                if (gen == homeGeneration) {
+                                    main.post {
+                                        if (gen == homeGeneration) {
+                                            appendSection(Section(rows[idx].name, rows[idx].id, sec))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (remaining.decrementAndGet() == 0) {
+                        val drawn = synchronized(lock) { drawnCount }
+                        main.post {
+                            if (gen != homeGeneration) return@post
+                            showLoading(false)
+                            if (drawn == 0 && resumeItems.isEmpty()) {
+                                showHint(getString(R.string.home_empty), 0)
+                            }
+                            revealPage(0)
+                            // ⚠️ 只有「用户还在首页」时才把焦点抓去第一张卡。
+                            //    取数要十几秒，这期间用户很可能已经切到媒体库/搜索页了 ——
+                            //    无条件 requestFocus 会把焦点从顶栏抢到一个 GONE 的页面里，
+                            //    结果是整屏没有任何高亮、方向键全部失效（实测踩过）。
+                            if (focusFirst && tabIndex == 0) {
+                                focusHomeFirstCard(force = true)
+                            } else if (tabIndex == 0) {
+                                restoreHomeFocus()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -600,7 +685,7 @@ class HomeActivity : Activity() {
         sectionContainer.addView(createRow(sec, index))
 
         // 第一行已经画出来了 —— 全屏转圈该收了。
-        // 不等 `loadHome` 整体结束：它是串行取五六个库，最后一个库回来之前屏幕上
+        // 不等 `loadHome` 整体结束：各行是并发取的，最慢的那一路回来之前屏幕上
         // 已经有内容了，转圈还赖在正中，还会挡住刚画出来的卡片（实测：转圈叠在
         // 「继续观看」的海报上）。顶栏底下那条 3dp 跑马灯继续跑，暗示「后面还有」。
         if (index == 0) hideSpinner()
@@ -648,7 +733,7 @@ class HomeActivity : Activity() {
                 isFocusableInTouchMode = true
                 isClickable = true
             }
-            more.setOnClickListener { openLibrary(libraryId, title, false) }
+            more.setOnClickListener { openLibraryTab(libraryId) }
             more.setOnKeyListener { _, keyCode, event ->
                 if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                 when (keyCode) {
@@ -1233,8 +1318,8 @@ class HomeActivity : Activity() {
     /**
      * 搜索框：走 [TvDialog] 的输入形态。
      *
-     * 电视上用遥控器逐字输入体验很差 —— [LibraryActivity] 里还有「手机扫码输入」那条路，
-     * 这里先把电视输入做对，手机的等这套界面稳定了再接过来。
+     * 电视上用遥控器逐字输入体验很差，所以搜索页另有「手机扫码输入」那条路
+     * （见 [showQrDialog]）。
      */
     private fun showSearchInput() {
         val input = EditText(this).apply {
@@ -1270,9 +1355,16 @@ class HomeActivity : Activity() {
      *
      * 不扶的话焦点会落在框架自己挑的那个视图上（通常是第一个 tab），
      * 一旦放开防抖就立刻把页面切走。
+     *
+     * ⚠️ **弹窗可以套娃**（设置菜单 → 体验优化计划 → 确认框），内层关掉时外层还开着。
+     *    这时若放开闸门并把焦点拽回内容区，用户刚打开的那个对话框会立刻丢焦点。
+     *    所以先问 [PopupGate]：还有窗口开着就什么都不做，让最外层关的时候统一收尾。
      */
     private fun restoreFocusAfterDialog(target: View? = null) {
         main.postDelayed({
+            // 这 80ms 里页面可能已经走了（退出登录那条路：confirm → finish）
+            if (isFinishing || isDestroyed) return@postDelayed
+            if (PopupGate.anyOpen()) return@postDelayed
             suppressTabSwitch = false
             if (target != null && target.isShown) target.requestFocus()
             else if (tabIndex == 2) searchBox.requestFocus()
@@ -1347,6 +1439,9 @@ class HomeActivity : Activity() {
             )
         )
         qrDialog = dlg
+        // ⚠️ 这一行**覆盖**了 TvDialog 内部设的 setOnDismissListener（同一把锁只能挂一个监听）。
+        //    这里没传 onDismiss 给 TvDialog，所以覆盖不丢东西；但以后要给这个对话框补
+        //    onDismiss 时，得写进下面这个 lambda，而不是再传参。
         dlg.setOnDismissListener {
             qrDialog = null
             phoneServer?.stop()
@@ -1372,11 +1467,26 @@ class HomeActivity : Activity() {
         if (rv.adapter?.itemCount == 0) return
         val lm = rv.layoutManager as? GridLayoutManager ?: return
         val v = lm.findViewByPosition(0)
-        if (v != null) {
-            v.requestFocus()
-        } else {
-            lm.scrollToPositionWithOffset(0, 0)
-            rv.post { lm.findViewByPosition(0)?.requestFocus() }
+        if (v != null && v.requestFocus()) return
+        lm.scrollToPositionWithOffset(0, 0)
+        focusGridRetry(rv, 6)
+    }
+
+    /**
+     * 等第 0 张卡真正布局出来再交焦点（最多重试 [tries] 帧）。
+     *
+     * ⚠️ 不能用 `post {}`：`scrollToPositionWithOffset` 只是请求一次遍历，
+     *    `post` 常常排在那次遍历之前跑，此时第 0 张卡还没 attach，
+     *    `findViewByPosition(0)` 拿到 null —— 焦点原地不动。
+     *    这正是「点更多切到媒体库后，焦点掉在『排序』那颗 chip 上」的成因。
+     */
+    private fun focusGridRetry(rv: RecyclerView, tries: Int) {
+        rv.postOnAnimation {
+            if (isFinishing || isDestroyed) return@postOnAnimation
+            val lm = rv.layoutManager as? GridLayoutManager ?: return@postOnAnimation
+            val v = lm.findViewByPosition(0)
+            if (v != null && v.requestFocus()) return@postOnAnimation
+            if (tries > 0) focusGridRetry(rv, tries - 1)
         }
     }
 
@@ -1424,12 +1534,11 @@ class HomeActivity : Activity() {
         if (item.isPlayable) {
             play(item)
         } else {
-            // 文件夹 / 合集这类需要再下钻的，交给老的分层界面
-            openLibrary(
-                if (item.isFolder) item.id else item.seriesId,
-                item.displayTitle(),
-                false
-            )
+            // 走到这里说明是一张「文件夹型」的卡片（`isPlayable` 要求 !isFolder）。
+            // 首页和媒体库都按 `POSTER_TYPES = Movie,Series,Video` 取数，
+            // 正常情况下不会出现这种卡；万一服务端把某个视频标成了文件夹，
+            // 就说明白，别让用户点了没反应。
+            toast("「${item.displayTitle()}」是个文件夹，展开请到媒体库")
         }
     }
 
@@ -1439,14 +1548,63 @@ class HomeActivity : Activity() {
         startActivityForResult(DetailActivity.intent(this, item), REQ_DETAIL)
     }
 
-    private fun openLibrary(parentId: String?, name: String?, openSearch: Boolean) {
-        val i = Intent(this, LibraryActivity::class.java)
-        if (parentId != null) {
-            i.putExtra(LibraryActivity.EXTRA_PARENT_ID, parentId)
-            i.putExtra(LibraryActivity.EXTRA_PARENT_NAME, name ?: "")
+    /**
+     * 打开某个库的完整海报墙 —— 区块标题右侧那个「更多 ›」。
+     *
+     * 以前这里跳的是 `LibraryActivity`（老的左栏分层列表）。那套界面已经被
+     * 首页 + 媒体库页完全覆盖（同样的库、同样的海报墙、同样能翻页），
+     * 留着只是多一个长得不一样的入口，所以删掉，改成**切到媒体库页并选中这个库**。
+     *
+     * ⚠️ 用 `post` 而不是直接切：`switchTab(1)` 会先把页面显出来、再触发取数，
+     *    紧接着 `selectLibrary` 才能拿到正确的 `libGrid` 布局状态。
+     *    两步之间没有延迟的话，`focusGrid` 会落在一个还没 layout 的 RecyclerView 上，
+     *    焦点丢失（真机表现是「点了更多，页面切过去了但遥控器没反应」）。
+     */
+    private fun openLibraryTab(libraryId: String) {
+        val index = libraries.indexOfFirst { it.id == libraryId }
+        if (index < 0) {
+            // 首页区块用的库 id 一定来自 libraries；对不上说明列表还没加载完
+            toast("这个库还没加载出来，稍后再试")
+            return
         }
-        if (openSearch) i.putExtra(LibraryActivity.EXTRA_OPEN_SEARCH, true)
-        startActivityForResult(i, REQ_LIBRARY)
+        // ⚠️⚠️ 必须先关掉「焦点即切换」的闸门（[suppressTabSwitch]）。
+        //    `switchTab(1)` 里 `showPage(1)` 会把整个首页设成 `GONE`，而此刻焦点正停在
+        //    刚按过的那颗「更多 ›」上 —— 视图一消失，系统立刻把焦点甩给顶栏最近的可聚焦物
+        //    （就是「首页」那颗 tab），它的焦点监听排一个 260ms 的 [scheduleTabSwitch] →
+        //    **页面刚切过去又被切回首页**。实测现象：logcat 里那句日志打了、
+        //    页面却纹丝不动，顶栏仍是「首页」选中。
+        //    → 切之前关门，等媒体库页真正拿到焦点后再放开。不能一直关着，
+        //      否则「焦点即切换」永久失效（那是之前修过的另一个 bug）。
+        suppressTabSwitch = true
+        // 一次做完「切页 + 选中这个库」，不再先 switchTab(1) 再补一次 selectLibrary ——
+        // 那样同一个库会被拉两遍，后回来的那次 submit() 把已经拿到焦点的卡 detach 掉，
+        // 焦点被框架甩到「排序」那颗 chip 上（实测）。
+        switchTab(1, libraryTarget = index)
+        // 这个库的海报是第一页并发取的，切过来时 libGrid 常常还是空的 ——
+        // `focusGrid` 遇到空 adapter 直接 return。补几次重试，数据一到就把焦点放进网格。
+        listOf(200L, 500L, 1_000L, 1_800L).forEach { delayMs ->
+            main.postDelayed({ focusLibraryGridIfNeeded() }, delayMs)
+        }
+        // 闸门最后放开：期间焦点可能被「首页 tab 拿到焦点」抢走一次，
+        // 放开前再确认一遍焦点确实在内容区。
+        main.postDelayed({
+            if (!isFinishing && !isDestroyed && tabIndex == 1) {
+                focusLibraryGridIfNeeded()
+                suppressTabSwitch = false
+            }
+        }, 2_200L)
+    }
+
+    /** 焦点还不在媒体库网格里就把它挪进去（网格没数据时 `focusGrid` 自己会空转）。 */
+    private fun focusLibraryGridIfNeeded() {
+        if (isFinishing || isDestroyed) return
+        if (tabIndex != 1 || PopupGate.anyOpen()) return
+        var v: View? = currentFocus
+        while (v != null) {
+            if (v === libGrid) return
+            v = v.parent as? View
+        }
+        focusGrid(libGrid)
     }
 
     private fun play(item: MediaItem, startMs: Long = item.resumeMs) {
@@ -1485,8 +1643,6 @@ class HomeActivity : Activity() {
         when (requestCode) {
             // 播完回来：刷新继续观看的进度
             REQ_PLAY -> if (pageReady[0] && tabIndex == 0) loadHome(focusFirst = false)
-            // 从老的分层界面回来（可能换了库 / 播过东西）：媒体库页重新取第一页
-            REQ_LIBRARY -> if (tabIndex == 1) selectLibrary(libIndex, focusGrid = false)
             // 从详情页回来：详情页里可能播过东西，进度和「继续观看」都要重刷
             REQ_DETAIL -> {
                 if (pageReady[0]) loadHome(focusFirst = false)
@@ -1510,11 +1666,12 @@ class HomeActivity : Activity() {
                     UpdateUi.check(this, worker, main, ::toast)
                 },
                 TvMenu.Item("反馈", "把设备信息发给开发者") { showFeedback() },
+                TvMenu.Item("体验优化计划", playStatsLabel()) { showStatsMenu() },
+                TvMenu.Item("播完自动下一集", autoNextLabel()) { toggleAutoNext() },
                 TvMenu.Item("刷新首页", "重新取一遍数据") {
                     pageReady.fill(false)
                     if (tabIndex == 0) loadHome(focusFirst = false) else switchTab(0)
                 },
-                TvMenu.Item("媒体库（列表视图）", "老的左栏界面") { openLibrary(null, null, false) },
                 TvMenu.Item("退出登录", "清掉本地登录态") { confirmLogout() }
             ),
             onDismiss = { restoreFocusAfterDialog() }
@@ -1532,6 +1689,107 @@ class HomeActivity : Activity() {
     private fun showFeedback() {
         suppressTabSwitch = true
         FeedbackUi.show(this, worker, main, ::toast) { restoreFocusAfterDialog() }
+    }
+
+    // ==================== 播完自动下一集 ====================
+
+    /**
+     * 设置菜单里那行副标题。
+     *
+     * 写清楚「最后一集会停」而不是只说「开 / 关」：用户最怕的是
+     * 关电视前手一滑、它自己一集接一集播到天亮。
+     */
+    private fun autoNextLabel(): String =
+        if (session.autoNextEpisode) "开：播完自动接下一集（最后一集停）"
+        else "关：播完停在结尾"
+
+    /**
+     * 一键切换，不走二次确认。
+     *
+     * 和「体验优化计划」不同：那个一旦打开就开始往外发数据，值得一次确认；
+     * 这个纯属本地播放行为，用户随时能再点回来，多一个确认框只是多两次方向键。
+     */
+    private fun toggleAutoNext() {
+        val on = !session.autoNextEpisode
+        session.autoNextEpisode = on
+        toast(if (on) "播完自动接下一集：已开启" else "播完自动接下一集：已关闭")
+    }
+
+    // ==================== 体验优化计划 ====================
+
+    /** 设置菜单里那行副标题 —— 直接把「发不发 / 不发什么」写出来。 */
+    private fun playStatsLabel(): String =
+        if (session.playStatsEnabled) "开：每次播放只发性能数字"
+        else "关：不上报任何播放记录"
+
+    /**
+     * 「体验优化计划」开关。
+     *
+     * ## 为什么要这个开关，以及为什么默认关
+     *
+     * [PlayStats] 这条链路和「反馈」不是一回事：反馈是用户点一下、填一句话、
+     * 自己看着进度条发出去的；打点是**每次退出播放器**自动发一条，
+     * 不弹框、不确认、失败静默。默认开等于「用户从没同意过但一直在发」——
+     * 哪怕内容只有首帧毫秒数，这个形态也不该存在。
+     *
+     * 所以：默认关，只有用户自己在这里打开才发（[Session.playStatsEnabled]）。
+     * 打开时给一次确认，把「具体发哪几个字段」念一遍 —— 遥控器上的二次确认
+     * 值这个成本，总比事后解释「你到底传了我什么」便宜。
+     *
+     * ## 为什么不做首启弹窗
+     *
+     * 首启那一刻用户还在输服务器地址 / 扫码，App 连自己能不能用都没证明，
+     * 这时候问「要不要参与改进」几乎没有说服力，答「不」是默认反应；
+     * 而且它会额外多占两三次方向键。放在设置里，想开的人自然会找到。
+     */
+    private fun showStatsMenu() {
+        suppressTabSwitch = true
+        val on = session.playStatsEnabled
+        TvMenu.show(
+            this,
+            "体验优化计划",
+            listOf(
+                TvMenu.Item(
+                    "关闭",
+                    if (!on) "当前" else "不再自动上报任何播放数据"
+                ) { applyPlayStats(false) },
+                TvMenu.Item(
+                    "开启",
+                    if (on) "当前" else "播放结束后发一条性能数字"
+                ) { applyPlayStats(true) }
+            ),
+            onDismiss = { restoreFocusAfterDialog() }
+        )
+    }
+
+    /**
+     * 关是立刻生效的；开要走一次确认，因为开完就会开始外发数据。
+     *
+     * ⚠️ 确认框是**新开的窗口**，和 [showFeedback] 同一个坑：
+     * 它一关，Activity 重新拿到焦点，系统会把焦点塞给第一个 tab，
+     * 于是「焦点即切换」立刻把页面拽回首页。所以 onDismiss 里再扶一次焦点。
+     */
+    private fun applyPlayStats(on: Boolean) {
+        if (!on) {
+            session.playStatsEnabled = false
+            toast("已退出体验优化计划，不再上报播放数据")
+            return
+        }
+        TvDialog.confirm(
+            this,
+            "开启体验优化计划",
+            "每次播放结束会自动上报一条性能数据：\n\n" +
+                "首帧耗时、播放时长、掉帧数、重缓冲次数、码率、\n" +
+                "编解码格式、解码器名称、片名与条目 id。\n\n" +
+                "不含账号、密码、播放进度、片库清单、Wi-Fi 名称和局域网 IP。\n" +
+                "只发到你自己配置的那个反馈服务器。",
+            confirmText = "开启",
+            cancelText = "算了",
+            onDismiss = { restoreFocusAfterDialog() }
+        ) {
+            session.playStatsEnabled = true
+            toast("已加入体验优化计划")
+        }
     }
 
     /**
@@ -1643,14 +1901,61 @@ class HomeActivity : Activity() {
                 TvMenu.Item(
                     "系统 JSSE",
                     if (cur == TlsStack.TlsImpl.SYSTEM) "当前" else "只有 CBC 套件，新式站点连不上"
-                ) { applyTlsImpl(TlsStack.TlsImpl.SYSTEM) }
+                ) { applyTlsImpl(TlsStack.TlsImpl.SYSTEM) },
+                // 「新域名先试哪条」是**另一件事**，跟上面三选一正交：
+                // 上面定「主动用什么」，这里定「没有记录时先赌哪条」。
+                // 默认开：系统栈能用就用，省掉 Conscrypt 那 8MB 原生库。
+                TvMenu.Item(
+                    "新域名先试系统库",
+                    if (TlsStack.probeSystemFirst(this)) "开 · 系统库能连就用它"
+                    else "关 · Conscrypt 优先，零失败握手"
+                ) { toggleProbeSystemFirst() },
+                TvMenu.Item(
+                    "已记录的域名",
+                    rememberedHostsLabel()
+                ) { forgetTlsHosts() }
             ),
             onDismiss = { restoreFocusAfterDialog() }
         )
     }
 
+    /**
+     * 切换「新域名先试系统库」。
+     *
+     * 打开时会把已有记录清空 —— 那些记录是按旧策略试出来的结论，
+     * 留着会让新策略形同虚设。
+     */
+    private fun toggleProbeSystemFirst() {
+        val on = !TlsStack.probeSystemFirst(this)
+        TlsStack.setProbeSystemFirst(this, on)
+        toast(
+            if (on) "新域名将先试系统库；谈不拢会自动换回 Conscrypt"
+            else "已改回 Conscrypt 优先；域名记录已清空"
+        )
+    }
+
+    private fun rememberedHostsLabel(): String {
+        val list = TlsHostMemory.snapshot(this)
+        if (list.isEmpty()) return "还没记录，点此无操作"
+        val names = list.joinToString("、") { it.first }
+        return "清空 $names"
+    }
+
+    private fun forgetTlsHosts() {
+        val n = TlsHostMemory.snapshot(this).size
+        if (n == 0) {
+            toast("还没有域名记录")
+            return
+        }
+        TlsHostMemory.clear(this)
+        toast("已清空 $n 个域名的 TLS 记录")
+    }
+
     private fun applyTlsImpl(impl: TlsStack.TlsImpl) {
         TlsStack.setPref(this, impl)
+        // 手动锁了实现，按域名试出来的旧结论就不再适用（记录优先级低于手动锁定，
+        // 但留着会在下次切回「自动」时把旧结论又翻出来，容易看花眼）
+        TlsHostMemory.clear(this)
         toast("TLS 实现已切换到「${tlsImplLabel()}」，建议重新登录一次")
     }
 
@@ -1747,7 +2052,21 @@ class HomeActivity : Activity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         // 系统栏会在焦点变化后偷偷回来，这里再收一次
-        if (hasFocus) hideSystemBars()
+        if (!hasFocus) return
+        hideSystemBars()
+        // ⚠️ 闸门兜底。`suppressTabSwitch` 的正规复位在各弹窗的 onDismiss 里，
+        //    但那要求**每个调用方都记得传 onDismiss** —— 只要漏一个
+        //    （`showServerInfo` 就漏了：只弹一个「好」，谁想得起来），
+        //    闸门就永久关着，现象是「顶栏焦点不跟随切页，得再按一次确认」。
+        //    弹窗全部关掉时 Activity 一定会重新拿到窗口焦点，这里是唯一可靠的收口点。
+        main.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            if (PopupGate.anyOpen()) return@postDelayed
+            if (!suppressTabSwitch) return@postDelayed
+            suppressTabSwitch = false
+            // 这期间焦点多半被系统塞给了第一个 tab，扶回当前页内容区
+            if (tabIndex == 2) searchBox.requestFocus() else focusContentOf(tabIndex)
+        }, 120)
     }
 
     override fun onDestroy() {
@@ -1758,6 +2077,9 @@ class HomeActivity : Activity() {
         phoneServer?.stop()
         phoneServer = null
         worker.shutdownNow()
+        // 首页各行的取数池也必须收：Activity 没了线程还在发请求，
+        // 回来的结果会 post 到一个已经 detach 的界面上（虽然守卫拦得住，但白耗 CPU 和流量）
+        rowPool.shutdownNow()
     }
 
     private fun hideSystemBars() {
@@ -1841,7 +2163,6 @@ class HomeActivity : Activity() {
         private const val POSTER_TYPES = "Movie,Series,Video"
 
         private const val REQ_PLAY = 2001
-        private const val REQ_LIBRARY = 2002
         private const val REQ_DETAIL = 2003
 
         /** 媒体库排序存盘的 key（SharedPreferences 文件名见 [uiPrefs]）。 */

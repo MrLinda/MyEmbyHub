@@ -47,12 +47,6 @@
             android:configChanges="keyboardHidden|orientation|screenSize" />
 
         <activity
-            android:name=".ui.LibraryActivity"
-            android:exported="true"
-            android:screenOrientation="landscape"
-            android:configChanges="keyboardHidden|orientation|screenSize" />
-
-        <activity
             android:name=".ui.PlayerActivity"
             android:exported="true"
             android:screenOrientation="landscape"

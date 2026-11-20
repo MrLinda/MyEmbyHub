@@ -15,9 +15,7 @@ import java.util.concurrent.Executor
 /**
  * 在线更新的界面部分（检查 → 确认 → 下载 → 调起安装器）。
  *
- * 首页和老的列表视图（[LibraryActivity]）都从这里进，各自只传自己的
- * worker / 主线程 Handler / toast —— 那两个 Activity 已经各有一份，
- * 没必要为了这个功能再各写一遍三段对话框。
+ * 首页从这里进，只传自己的 worker / 主线程 Handler / toast。
  */
 object UpdateUi {
 
@@ -56,7 +54,8 @@ object UpdateUi {
                     TvDialog.message(
                         activity,
                         "检查更新失败",
-                        "${friendlyError(e)}\n\n更新地址：$manifest"
+                        "${friendlyError(e)}\n\n更新地址：$manifest",
+                        scrollable = true
                     )
                 }
             }
@@ -83,7 +82,10 @@ object UpdateUi {
             "在线更新",
             msg,
             confirmText = "下载",
-            cancelText = "稍后"
+            cancelText = "稍后",
+            // 更新说明会越来越长（每版都往里堆），不给滚动的话内容一多
+            // 就把面板顶出屏幕、按钮直接看不见 —— 系统安装器也是内容自己滚
+            scrollable = true
         ) {
             download(activity, um, release, worker, main, toast)
         }

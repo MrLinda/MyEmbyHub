@@ -57,51 +57,16 @@ class PosterAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
         val v = LayoutInflater.from(parent.context)
             .inflate(R.layout.item_home_poster, parent, false)
-        return Holder(v)
-    }
+        val holder = Holder(v)
 
-    override fun onBindViewHolder(holder: Holder, position: Int) {
-        val item = items[position]
-        holder.itemId = item.id
-
-        // 单集的 name 是「剧名 - S01E01 - 2160p」这种长串，150dp 宽的卡片塞不下，
-        // 卡面上只留剧名 —— 集数在详情页里看得更清楚
-        holder.title.text =
-            if (item.type == "Episode" && item.seriesName.isNotEmpty()) item.seriesName
-            else item.displayTitle()
-        holder.placeholder.text = item.name.take(1)
-
-        // 海报：单集自己没有图（取图会 500），用所属剧的
-        val posterId = if (item.type == "Episode") item.seriesId else item.id
-        holder.request?.cancel()
-        holder.request = null
-        holder.poster.setImageDrawable(null)
-        holder.poster.visibility = View.INVISIBLE
-        holder.placeholder.visibility = View.VISIBLE
-
-        if (posterId.isNotEmpty()) {
-            holder.request = ImageLoader.get(holder.itemView.context)
-                .load(posterId, "Primary", POSTER_WIDTH) { bmp ->
-                    // 回调回来时 holder 可能已经绑了别的条目
-                    if (holder.itemId == item.id && bmp != null) {
-                        holder.poster.setImageBitmap(bmp)
-                        holder.poster.visibility = View.VISIBLE
-                        holder.placeholder.visibility = View.GONE
-                    }
-                }
-        }
-
-        if (item.positionTicks > 0 && item.runtimeTicks > 0) {
-            holder.progress.progress =
-                ((item.positionTicks * 100) / item.runtimeTicks).toInt().coerceIn(0, 100)
-            holder.progress.visibility = View.VISIBLE
-        } else {
-            holder.progress.visibility = View.GONE
-        }
-
-        // 遥控器边界：交给外面处理，外面不接的话再让框架自己找邻居
+        // ⚠️ 三个监听器在这里**只挂一次**，位置在事件发生时用 `holder.adapterPosition` 现取。
+        //    早先是写在 onBindViewHolder 里的，每绑一次就 new 两个 lambda + 走一遍
+        //    `setOnKeyListener` 的 ListenerInfo 写入。快速滚动时一屏十几张卡、
+        //    每张反复绑，光这些对象就是实打实的 GC 压力（96MB 堆的机器上很敏感）。
         holder.itemView.setOnKeyListener { view, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+            val position = holder.adapterPosition
+            if (position == RecyclerView.NO_POSITION) return@setOnKeyListener false
             when {
                 position < firstRowCount && keyCode == KeyEvent.KEYCODE_DPAD_UP ->
                     onUpFromFirstRow?.invoke(position) ?: false
@@ -130,10 +95,59 @@ class PosterAdapter(
 
         // 卡片拿到焦点时告诉外面「是第几张」，外面用它把整页滚回该有的姿势
         holder.itemView.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) onCardFocused?.invoke(position)
+            if (hasFocus) {
+                val position = holder.adapterPosition
+                if (position != RecyclerView.NO_POSITION) onCardFocused?.invoke(position)
+            }
         }
 
-        holder.itemView.setOnClickListener { onClick(item) }
+        holder.itemView.setOnClickListener {
+            val position = holder.adapterPosition
+            if (position != RecyclerView.NO_POSITION) onClick(items[position])
+        }
+        return holder
+    }
+
+    override fun onBindViewHolder(holder: Holder, position: Int) {
+        val item = items[position]
+        holder.itemId = item.id
+
+        // 单集的 name 是「剧名 - S01E01 - 2160p」这种长串，150dp 宽的卡片塞不下，
+        // 卡面上只留剧名 —— 集数在详情页里看得更清楚
+        holder.title.text =
+            if (item.type == "Episode" && item.seriesName.isNotEmpty()) item.seriesName
+            else item.displayTitle()
+        holder.placeholder.text = item.name.take(1)
+
+        // 海报：单集自己没有图（取图会 500），用所属剧的
+        val posterId = if (item.type == "Episode") item.seriesId else item.id
+        holder.request?.cancel()
+        holder.request = null
+        holder.poster.setImageDrawable(null)
+
+        // ⚠️ **不要在这里切 `visibility`**（2026-11-19 改）。
+        //    `setVisibility()` 每次都会 `requestLayout()` —— 一张卡里有 4 层，
+        //    绑一次就引发好几轮 measure/layout，快速滚动时这就是掉帧的主因。
+        //    占位字本来就在 ImageView **下面**那一层，ImageView 没有 drawable 时
+        //    什么也不画，占位字自然透出来；有图时整张盖住。所以根本不需要切可见性。
+
+        if (posterId.isNotEmpty()) {
+            holder.request = ImageLoader.get(holder.itemView.context)
+                .load(posterId, "Primary", POSTER_WIDTH) { bmp ->
+                    // 回调回来时 holder 可能已经绑了别的条目
+                    if (holder.itemId == item.id && bmp != null) {
+                        holder.poster.setImageBitmap(bmp)
+                    }
+                }
+        }
+
+        if (item.positionTicks > 0 && item.runtimeTicks > 0) {
+            holder.progress.progress =
+                ((item.positionTicks * 100) / item.runtimeTicks).toInt().coerceIn(0, 100)
+            holder.progress.visibility = View.VISIBLE
+        } else {
+            holder.progress.visibility = View.GONE
+        }
     }
 
     override fun onViewRecycled(holder: Holder) {
