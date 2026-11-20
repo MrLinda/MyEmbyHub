@@ -128,6 +128,12 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 > 打包时用 `local.properties` 里的 `updateRepo=<owner>/<repo>` 决定清单里的下载地址；
 > 不填则退回 `updateHost` 指向的局域网静态服务（只用于调试，别发 Release）。
 
+> **发版用 `:app:assembleRelease`，不是 `assembleDebug`**（2026-11-19 改）。
+> 发布包是**固定密钥签名的正式包**，资产名 `myembyhub.apk`，不再带 `-debug` 后缀、不可调试。
+> 密钥在仓库外：`../MyEmbyHub-keys/myembyhub.jks`，口令在同目录 `STORE-PASSWORD.txt`，
+> `local.properties` 里用 `storeFile` / `storePassword` / `keyAlias` / `keyPassword` 指向它。
+> 换密钥 = 所有已装设备都装不上新包（必须卸载重装），所以**这把钥匙不能换、要备份**。
+
 > ⚠️ `gradlew :app:assembleDebug` **只生成 `dist/version.json`，不会把 APK 拷进 `dist/`** ——
 > 打包后要手动同步（`tools/publish-release.ps1` 会自动补这一步），
 > 否则电视在线更新会下载到旧包。
@@ -146,7 +152,8 @@ Emby 电视客户端项目。**主战场是一台乐视 S50 Air 智能电视**�
 ```bash
 # 构建（用 Studio 自带 JBR，JDK 25）
 set JAVA_HOME=E:\Programs\Android\Android Studio\jbr
-gradlew :app:assembleDebug                        # 正式 TV 客户端（会自动生成 dist/version.json）
+gradlew :app:assembleDebug                        # 调试包（会自动生成 dist/version.json）
+gradlew :app:assembleRelease                      # **发版用这个**：固定密钥签名的正式包
 gradlew :app:assembleDebug -PupdateHost=1.2.3.4:8765   # 把更新源烤进清单
 gradlew :app:testDebugUnitTest                    # UrlKit 的 URL / 重定向解析回归测试（不需要电视）
 
@@ -165,7 +172,7 @@ cd dist && python -m http.server 8765 --bind 0.0.0.0
 
 ```bash
 # 1) 拉起界面（不用装新包就能复现已装版本的行为）
-adb shell am start -n work.luxiaoxiao.myembyhub/.ui.LibraryActivity
+adb shell am start -n work.luxiaoxiao.myembyhub/.ui.HomeActivity
 
 # 2) 看日志（崩溃、异常都从这里抓）
 adb logcat | Select-String -Pattern 'myembyhub|AndroidRuntime|FATAL'
@@ -219,14 +226,14 @@ adb connect 192.168.1.100:5555
 
 ```bash
 # 1) 推送
-adb push dist/myembyhub-debug.apk /sdcard/Download/myembyhub.apk
+adb push dist/myembyhub.apk /sdcard/Download/myembyhub.apk
 # 2) 调起系统安装器（电视上需要人按一次「安装」）
 adb shell am start --user 0 -a android.intent.action.VIEW \
   -d 'file:///sdcard/Download/myembyhub.apk' -t 'application/vnd.android.package-archive'
 ```
 
 **装上带「在线更新」的版本之后就不用再手动推了**：电脑起 `python -m http.server 8765`，
-电视上「在线更新」填 `http://192.168.1.50:8765/myembyhub-debug.apk` 即可。
+电视上「在线更新」填 `http://192.168.1.50:8765/myembyhub.apk` 即可。
 
 ---
 
@@ -373,7 +380,7 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   ② 源码目录 + 所有 `package` 声明 / `import`；
   ③ **`app/proguard-rules.pro` 的 BuildConfig keep 规则**（最容易漏，
   脚本按扩展名批量替换时 `.pro` 常常被漏掉）；
-  ④ `tools/*.ps1` 里的 `am start -n <包名>/.ui.LibraryActivity`。
+  ④ `tools/*.ps1` 里的 `am start -n <包名>/.ui.HomeActivity`。
   → 症状：改完包名，「服务器信息」的「客户端版本」是空的。
   → 验证：`adb logcat | Select-String BuildConfig` 看有没有 `NoSuchFieldException`。
 - ⚠️ **zxing 必须用 3.2.1**：3.3.0+ 的 `qrcode.encoder.Encoder` 静态初始化引用
@@ -388,7 +395,8 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   → 电视是 4.3，没有运行时权限机制，`uses-permission` 写上就装机即授；
   → 排查手法：`aapt2 dump permissions <apk>` 直接看打包结果里有没有这条。
 - ⚠️ **`RecycledViewPool` 是按 `viewType` 分桶的 —— 两列布局不同却共用一个池会「串台」。**
-  `LibraryActivity` 里左右两列**布局不一样**（左栏 `item_rail` 纯文字、右栏 `item_media` 带海报），
+  （历史坑，出在已删除的 `LibraryActivity` 上，但结论对任何「两列共用回收池」的界面都成立）
+  当时左右两列**布局不一样**（左栏 `item_rail` 纯文字、右栏 `item_media` 带海报），
   而 RecyclerView 默认所有 item 的 `viewType` 都是 0；
   再加上 `rvRight.setRecycledViewPool(rvLeft.recycledViewPool)`，
   右栏的 `item_media` holder 就会被左栏回收走 →
@@ -469,6 +477,17 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   放进面板后会出现「双层壳」→ 背景去掉、标题交给面板、按钮换成对话框按钮样式。
   → 输入框的系统下划线是青蓝色（Material 走 colorPrimary），
   用 `bg_dialog_input.xml` 换成暖色细线。
+- ✅ **长内容对话框要 `scrollable = true`**（2026-11-19 落地：「检查更新」的更新说明
+  每版都往里堆，内容一多就把面板顶出屏幕、按钮直接看不见）：
+  `TvDialog.show/message/confirm` 都有 `scrollable: Boolean = false` 与
+  `maxContentHeightDp: Int = 300`；`UpdateUi` 两处已开。
+  → ⚠️ `ScrollView` 没有 maxHeight，只能**先 `content.measure(...)` 再按 `min(量出来的, 上限)` 定高**；
+    量宽必须是 `EXACTLY`（面板 560dp − 左右各 24dp = 512dp），用 `UNSPECIFIED` 会让 TextView 只量一行高。
+  → 焦点按用户要的「默认在按钮上」：焦点在内容区且 `!sv.canScrollVertically(1)` 时按 ↓ 交给
+    第一个按钮；在按钮行按 ↑ 回内容区。`ScrollView` 必须 `isFocusable = true`，
+    否则焦点直接跳过内容区（`isVerticalScrollBarEnabled` 只在内容超高时才给，不然一条无效滚动条很显眼）。
+  → 实测（30 行长 notes）：初始焦点在「下载」→ ↑ 进内容区 → 连按 20 次 ↓ 滚到底自动落到「稍后」，
+    按钮没被顶出屏幕。
 - ⚠️ **`Thread.sleep()` 一定要接住 `InterruptedException`**：
   `PhoneControlServer` 的定时线程在 `sleep(1000)`，
   而 `stop()` 里的 `worker.shutdownNow()` 会打断它 ——
@@ -521,6 +540,48 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   - `proguard-rules.pro` 要 `-keep class org.conscrypt.** { *; }` +
     `-keep interface org.conscrypt.** { *; }` + `-dontwarn org.conscrypt.**`
     （AAR 自带 proguard.txt 只有前一条，不 keep 会在运行时炸）。
+
+- ✅ **TLS 栈按域名记忆 + 失败自动换栈（2026-11-19 落地）**：
+  4.3 上有两条栈，**哪条能跟某台服务器谈成事先不知道**：系统 JSSE 只有 CBC，
+  Conscrypt 有 GCM/ChaCha20/TLS1.3 但要加载 8MB 原生库。现代服务器大多只开 GCM，
+  所以系统栈经常谈不拢 —— 但也不是全部（有的服务器两条都能连，
+  只开 GCM 的那台则只有 Conscrypt 能连）。
+  - 目标：**每个域名最多只付一次失败握手**。第一次谈不拢就换另一条重试，
+    结论写进 `SharedPreferences`（`myembyhub_tls_hosts` / 键 `map`，
+    形如 `srv-a.example.com=system;srv-b.example.com:1234=conscrypt`，最多 24 条），
+    以后直接照记录走。**不放内存表**：这台电视进程被杀是常态。
+  - 三个文件：`net/TlsHostMemory.kt`（存取 + 编解码 + 归一化）、
+    `net/TlsConn.kt`（`withRetry(ctx, trust, host) { factory -> ... }`）、
+    `TlsStack.chooseFor / escalate / noteSuccess / isHandshakeFailure`。
+  - ⚠️ **只在握手失败时换栈**：证书校验失败、DNS 错、超时不换 —— 换也救不回来，
+    还会把真因埋掉、往记录里写错结论。
+  - ⚠️ **「握手过了但接口报错」（401、JSON 解析失败）要记录**：那说明这条栈
+    能把 TLS 谈成，只是业务层出问题。只有 DNS/连不上/超时这三种不记（压根没走到 TLS）。
+  - ⚠️⚠️ **`TlsConn.withRetry` 包住的 block 必须把握手异常往外抛**：
+    第一版 `DeviceReport.upload` / `PlayStats.post` 在 `catch` 里直接
+    `Result.Fail(...)`，异常被吃在里层 → 换栈分支永远走不到，等于没实现。
+    规矩：业务失败照旧返回值，但要先 `if (TlsStack.isHandshakeFailure(e)) throw e`。
+    验证：`probe_system_first=true` + 清空记录 + 连只开 GCM 的服务器，
+    日志应出现 `用 SYSTEM 握手失败，换栈重试` → `换 CONSCRYPT 重试`，
+    且 `myembyhub_tls_hosts.xml` 立刻多出 `该域名=conscrypt`；
+    再冷启动一次应**直接** `TLS 使用 Conscrypt`，不再有失败握手。
+  - 设置页「TLS 实现」里多了「新域名先试系统库」（**默认开**）和「已记录的域名」。
+    默认开的理由：系统栈能用就该用它 —— Conscrypt 要映射 8MB 原生库 + 首次加载 JIT，
+    在 1.5GB / 96MB 堆的电视上是实打实的开销；而且它是「平台自己在走的那条路」。
+    代价只是每个新域名第一次可能多付一次握手，记录之后就没了。
+    ⚠️ 别因为「Conscrypt 更现代」就默认它：现代 ≠ 这台机器上更省。
+    切换它或手动锁定实现时都会**清空记录**（旧记录是按旧策略试出来的）。
+  - 反馈报告的 `tls.hostMemory` 是这张表的快照 —— 回答「用户那台机器上
+    这个服务器到底被哪条栈连上的」，设置页写的「自动」只说明策略、不说明结果。
+
+- ⚠️ **第一次 TLS 握手要单独放宽超时**（2026-11-19 实测，反馈上报的握手探测）：
+  第一次握手用 8 秒**超时失败**，紧接着同参数的第 2、3 次各 1 秒就成功 ——
+  差的正是「Conscrypt 原生库（8MB `.so`）首次加载 + JIT 预热」这一笔。
+  → 探针里第一次给 20 秒（`DeviceReport.FIRST_PROBE_TIMEOUT`），后续用 8 秒。
+  → 危害不只是「慢」：把冷启动那一笔报成 `SocketTimeoutException`，
+    整份报告会得出**反向结论**（「服务器连不上」），比没数据更糟。
+  → 反过来也成立：看到「第 1 次失败、第 2/3 次成功」这种组合，
+    先怀疑超时太紧，别急着下「服务器有问题」的结论。
 
 - ⚠️ **`ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED` 的一大来源：服务器把 `.iso` 光盘镜像挂进了媒体库**
   （2026-11-18 实测，朋友的服 `emby.example.com`《玉簟秋》）：
@@ -636,6 +697,125 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
     框架的 focus search 永远找不到它 —— 要靠 `onRightFromLastCard` 手工连。
     ⚠️ 行首判定别写 `position % firstColumnCount == 0`：首页每排传 `firstColumnCount = 1`，
     取模 1 恒为 0 → **每张卡都被当成行首**，按 ← 就乱跳（这就是「非最左边也跳去更多键」的真凶）。
+- ⚠️⚠️ **切页时焦点被甩回顶栏，会让「焦点即切换」把你切回去**（2026-11-19 踩）：
+  「更多 ›」从跳 `LibraryActivity` 改成 `switchTab(1)` 后**点了没反应** —— dump 里顶栏
+  `selected` 仍是「首页」。原因：`showPage(1)` 把 `pageHome` 设成 `GONE`，而此刻焦点正停在
+  刚按过的那颗「更多 ›」上 → 视图一消失，框架把焦点甩给顶栏最近的「首页」tab →
+  它的 `setOnFocusChangeListener` 排一个 260ms 的 `scheduleTabSwitch(0)` → **刚切过去又被切回来**。
+  → 修法：切之前 `suppressTabSwitch = true`，等目标页真正拿到焦点后再放开；放开前若焦点还挂在
+  `navItems` / `btnSettings` 上就 `focusContentOf(tab)` 拽回内容区。
+  → ⚠️ 不能一直关着：闸门永久关闭 = 「焦点即切换」彻底失效（那是另一个修过的 bug）。
+- ⚠️⚠️ **同一个列表拉两遍，会把已经拿到焦点的那张卡 detach 掉**（同一次踩）：
+  顶栏对了但焦点落在「排序 · 开播时间 ↓」这颗 chip 上，不进海报墙。轨迹是
+  「卡拿到焦点 → `null` → `lib_sort_row`」。
+  原因是 `switchTab(1)`（内部 `loadLibraryPageIfNeeded()` → `selectLibrary(libIndex)`）
+  紧接着又 `main.post { selectLibrary(index) }` —— 两次请求拉同一个库，后回来的那次
+  `notifyDataSetChanged()` 把已聚焦的卡 detach 掉，框架只好把焦点甩给最近的 widget。
+  → 修法：`switchTab(index: Int, libraryTarget: Int = -1)`，`libraryTarget >= 0` 时
+  **一次做完「切页 + 选中指定库」**，别再补第二次 `selectLibrary`。
+  → 通用教训：**任何「切页 + 定位」都不能拆成两次异步加载**，第二次刷新会把焦点顶掉。
+- ⚠️ **`scrollToPositionWithOffset()` 之后不能用 `post {}` 重试焦点**：它只是**请求**一次布局，
+  `post {}` 的 runnable 常常排在那次遍历之前跑，目标卡还没 attach，`findViewByPosition(0)`
+  拿到 `null` 就白跑。用 `rv.postOnAnimation { ... }`（见 `HomeActivity.focusGridRetry`）。
+  另外 `focusGrid` 前要判 `rv.adapter?.itemCount != 0`，否则 adapter 还空着时整段空转。
+
+- ✅ **播放页按键（2026-11-19 落地，细节见 [docs/player.md](docs/player.md)）**：
+  ←/→ 跳 10 秒（长按 5 秒，并浮出 `▶ 08:42 / 45:10`）、↑/↓ 上一集/下一集、
+  **菜单键按一下就出播放页菜单**（选集 / 字幕 / 诊断信息，诊断面板挪进菜单里了）、
+  确定/媒体键播放暂停（自己接管）、返回退出。
+- ⚠️ **国产电视遥控器的「菜单」键不一定是 `KEYCODE_MENU`**（2026-11-19 真机报「按菜单没反应」）：
+  乐视 S50 Air 这类遥控器的键码不统一，有的发 `SETTINGS`(176)、有的 `INFO`(165) /
+  `BOOKMARK`(174)，还有把「菜单」做成四个彩色键的。→ 叫出**播放页菜单**的是一整组
+  `DIAG_KEYS`（82 / 176 / 165 / 174 / 183-186 / 170 / 172），不是单个常量。
+  → 排查靠两条自建通道（电视上没有 uiautomator、`dumpsys` 没权限、用户看不到 logcat）：
+  ① `dispatchKeyEvent` 对每个 `ACTION_DOWN` 打 `key NNN(NAME) repeat=0`；
+  ② 按到的键不在 `KNOWN_KEYS` 里时**屏幕正中直接弹「未识别按键 NNN」**，
+  用户报回数字就能加。屏幕上什么都不弹 = 键被系统截走了，客户端改不了。
+  → ⚠️ `keyName()` 是手写映射表，**不能用 `KeyEvent.keyCodeToString()`**（API 19 才有，
+  4.3 上 `NoSuchMethodError`）。
+- ⚠️⚠️ **「当前是第几集」必须单独定位，别拿 `episodeIndex` 硬算**（2026-11-19 真机报「按上直接回第一集」）：
+  两个坑叠在一起 ——
+  ① `episodeIndex` 是 `-1` 时 `-1 + delta` 算出越界值，提示却是「已经是第一集了」，
+  用户自然理解成「跳回第一集」，实际是「不知道现在第几集」；
+  ② 按季号/集号兜底时 `MediaItem.indexNumber` / `parentIndexNumber` 默认值都是 **0**，
+  「继续观看」自己构造的 `MediaItem` 和没给集号的列表项全是 0 →
+  `indexOfFirst { 0 == 0 }` **必然命中第一集**。
+  → 修法 `resolveEpisodeIndex()`：按 id 对 → 季号/集号兜底要带 `want.indexNumber > 0`
+  且**候选必须唯一**（多季剧每季都从第 1 集编号，`parentIndexNumber` 缺失时会有多条候选，
+  宁可说「找不到」也不能瞎挑）；都对不上就老实提示「定位不到当前是第几集」。
+  → **教训：默认值也是值。** `Int` 字段用 `0` 表示「不知道」时，任何「相等就匹配」的
+  兜底逻辑都会退化成「匹配第一条」。
+- ⚠️ **ExoPlayer 自带控制栏已整个关掉**（`app:use_controller="false"`）：
+  上面 ⏮ ⏪ 播放 ⏩ ⏭ 五个按钮在这台电视上**永远按不到** —— 方向键被
+  `dispatchKeyEvent` 吃掉、又没有触摸屏。留着只会让人以为能按。
+  → 关掉之后必须自己补三件事：确定键 → `togglePlayPause()`；
+    进度 → `tv_seek` 浮一行；标题 → `showInfoBriefly()` 计时 3.5 秒。
+  → ⚠️ **暂停时一定要显示「已暂停」**（`tv_pause`）：画面本来就是静止的，
+    没有这个提示用户分不清「暂停了」和「卡住了」。
+- ⚠️ **字幕每行后面垫一条不透明黑底**：真凶是**系统无障碍字幕设置**，不是字幕文件。
+  `PlayerView` 构造里调 `SubtitleView.setUserDefaultStyle()` → 读
+  `CaptioningManager.getUserStyle()`；系统字幕一启用且底色是黑的（电视/盒子常见默认），
+  所有走 `SubtitleView` 的字幕都带黑底。客户端不显式 `setStyle` 就跟它走。
+  → 修法：`subtitleView.setStyle(CaptionStyleCompat(WHITE, TRANSPARENT, TRANSPARENT,
+    EDGE_TYPE_OUTLINE, BLACK, null))`，**`setStyle` 这一句才是修黑底的**；
+    必须放在 `playerView.player = p` 之后（构造里已先打入系统样式）。
+  → 描边不能省：透明底之后白字压在白墙/雪景上会糊成一片。
+  → ⚠️ `setApplyEmbeddedStyles` / `setApplyEmbeddedFontSizes` 是**只写属性**，
+    Kotlin 不能写 `sv.applyEmbeddedStyles = false`，编译期 `Unresolved reference`，只能调方法名。
+    它俩管的是「字幕文件改字号/斜体」，**与黑底无关**，别混。
+  → ⚠️ **别去查 ASS 的 `BackColour`，它压根不参与渲染**：解包
+    `exoplayer-extractor-2.19.1` 的 `classes.jar` 扫字符串，`BackColour` / `PrimaryColour` /
+    `Colour` 全部未命中，只命中 `BorderStyle` / `Alignment` —— `SsaDecoder` / `SsaStyle`
+    只读位置信息，颜色一律不读。实测把 `BackColour` 写成不透明红，画面上没有任何红条。
+  → 复现手法（模拟器默认字幕是关的，要主动打开黑底）：
+    `settings put secure accessibility_captioning_enabled 1` +
+    `accessibility_captioning_background_color -16777216`（0xFF000000），
+    验完 `... enabled 0` 复原。正向对照：把 `setStyle` 底色临时改 `Color.RED`，
+    应出现**红条**；不出现说明这个 `SubtitleView` 实例没被用上。
+- ⚠️ **内嵌字幕默认压根不会被选中**：`DefaultTrackSelector` 默认不选「既没语言标记、
+  也没 default/forced 标志」的字幕轨，而绝大多数 MKV 内嵌 ASS/SRT 两样都没有
+  → 片子里明明有字幕却一个字不显示，看着像「不支持字幕」。
+  → 必须 `setParameters(buildUponParameters().setSelectUndeterminedTextLanguage(true))`。
+  → 别用 `setPreferredTextLanguage("zh")` 凑：字幕没写 language 时那条规则同样匹配不上。
+- ✅ **字幕默认关，开关在播放页菜单里**（2026-11-19 用户要求，`Session.subtitleEnabled`
+  默认 `false`）：理由不是省性能，是**会重叠** —— 很多资源自带压进去的硬字幕，
+  再把内嵌轨渲染一遍就是上下两行字、内容还不一样；而硬字幕只能靠「关掉内嵌轨」避开，
+  播放器没法自动判断。
+  → 菜单那项会写出**这部片子有几条内嵌字幕轨**（数 `player.currentTracks` 里
+    `TRACK_TYPE_TEXT` 的组长度），看到「开（2 条内嵌字幕轨）」就知道值得开。
+  → 切换要 `trackSelector.setParameters(trackSelector.buildUponParameters()
+    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !on))` —— ⚠️ **必须 `buildUponParameters()`**，
+    整个重建会把 `setSelectUndeterminedTextLanguage(true)` 一起丢掉，开了也是空。
+  → ⚠️ `trackSelector` 必须存成 Activity 字段，`onCreate` 的局部变量在菜单回调里拿不到。
+  → 「默认关」和 `setSelectUndeterminedTextLanguage` 不冲突：后者决定「开了选哪条」，
+    前者决定「开不开」。
+- ⚠️⚠️ **方向键必须写在 `dispatchKeyEvent` 里，写 `onKeyDown` 是死代码**：
+  全屏播放时焦点在 `PlayerView` 上，它的控制器先消费掉上下左右 —— `onKeyDown` 只是兜底，
+  根本轮不到。真机症状是「按 ↓ 一点反应都没有、logcat 一行都不打」，而
+  `KEYCODE_MENU` 恰好没被控制器吃 → 「菜单键出面板」正常工作，**把 bug 完美掩盖**。
+  → 要用的键全在 `dispatchKeyEvent` 里截，`ACTION_DOWN` 时处理，**`ACTION_UP` 也要吞**
+  （`consumedKey` 记住 keyCode）—— 只吞按下会让系统报
+  `InputEventConsistencyVerifier: ACTION_UP but key was not down`，抬起漏给视图树还可能触发多余点击。
+  → 排查手法：`adb shell input keyevent 20` + `adb logcat -s PlayAct:*`，
+  有「起播：第 N 集」就是收到了，什么都没有就是没收到。
+- ⚠️ **切集必须清「只判一次」的守卫**（`firstFrameRendered` / `decoderInitialized` /
+  `capabilityBlocked` / `capabilityChecked` / `videoSupported` / `videoTrackCount` /
+  `stallRound` / `diagShown` / `endedNaturally` / `stopped`），并且 `removeCallbacks(stallCheck)`。
+  不清的具体后果：从 4K HEVC 切到 1080p，`capabilityBlocked` 还是 true、视频层已
+  `clearVideoSurface()` → 用户看到「有声音没画面」还挂着「硬解吃不下」的提示。
+  为此把起播 15 秒/20 秒两轮判定的匿名 `postDelayed` lambda 改成了具名 `stallCheck`（否则摘不掉）。
+- ⚠️ **切集顺序不能动**：`reportStop()` 要**先**跑（它读当前 `reportItem` / `playSessionId`），
+  再换 `reportItem`、再发新 `playSessionId`（沿用旧的会让服务端把两集算成一次播放）。
+- 剧集列表三个入口：详情页/媒体库**本来就带全集列表**（`EpisodeRef.encode` 编成 JSON 塞 Intent
+  extra，300 集约 40KB，远低于 Binder 200KB）；首页「继续观看」只有一个 itemId → 后台两步补拉
+  （`itemDetail(itemId).seriesId` → `episodes(seriesId)`），1~2 秒藏在起播缓冲里，失败静默。
+- 「播完自动下一集」默认开（`Session.autoNextEpisode`，key `auto_next_episode`），
+  设置菜单可关。`STATE_ENDED` → `reportStop()` → `main.post { autoAdvance() }`：
+  放 post 里是因为在回调栈里直接 `setMediaSource` 会让 ExoPlayer 自己重入。
+  三个提前退出分支各打一句日志（开关关 / 没列表 / 最后一集），方便用户报「没自动下一集」时定位。
+- ⚠️ 验自动续播**别用「seek 到距结尾 30 秒」**：远端对象存储会回
+  `HTTP 416 Requested Range Not Satisfiable` → `Source error`，播放器进错误态而不是
+  `STATE_ENDED`，看着像「自动下一集没做」。用本地 8 秒 Baseline 片最稳（见 docs/player.md 第 8 节）。
 
 ## 7. 工程构建坑位（AGP 9.5 / Gradle 9.6）
 
@@ -647,6 +827,46 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
 - 版本号：`versionCode` 用秒级时间戳（永远递增，可覆盖安装），`versionName` 形如
   `1.0.20261117.3`（末位 = 当天第几次打包，由根目录 `.version-seq` 记着，已 gitignore；
   只有跑 `assemble*` 时才自增，跑单测不吃号）。发版 tag 就是 `v` + `versionName`。
+
+### 7.1 签名与发版（2026-11-19 落地）
+
+**签名不需要申请。** Android 是自签名体系（self-signed），不经过任何机构审核 ——
+只要一把自己保管、永不更换的 keystore。
+
+| 项 | 值 |
+|---|---|
+| keystore | `../MyEmbyHub-keys/myembyhub.jks`（**仓库外**，不进 git） |
+| 口令 | 同目录 `STORE-PASSWORD.txt`（store 口令 = key 口令） |
+| 别名 | `myembyhub` |
+| 算法 / 有效期 | RSA 2048 / 10950 天（≈30 年） |
+| SHA-256 | `94:AE:F9:A9:55:0D:42:81:65:7E:8D:CF:0A:4E:00:53:41:B9:62:46:40:80:E9:D7:E8:14:6A:09:5F:99:AE:54` |
+| SHA-1 | `0C:6F:08:44:8D:EA:2A:FD:CE:5B:F3:D5:AE:7E:4B:40:DA:D6:8D:06` |
+
+`local.properties`（已 gitignore）里四项：`storeFile` / `storePassword` / `keyAlias` / `keyPassword`。
+
+> ⚠️ **换密钥 = 所有已装设备都装不上新包**（Android 按签名认应用身份），
+> 只能让用户卸载重装。所以这把钥匙要备份，别重建。
+
+- ⚠️ **Gradle Kotlin DSL 里 `signingConfigs` 会自赋值**：
+  `create("release") { storePassword = storePassword }` 右侧解析成接收者自己的同名属性
+  （初始 null）→ 四个字段全留空 → 构建报 `Keystore file not set for signing config release`。
+  → 解法：外部变量必须换名字（本项目用 `relStoreFile` / `relStorePassword` / `relKeyAlias` /
+  `relKeyPassword` 四个 `rel` 前缀的局部变量）。
+- ⚠️ **`enableV1Signing = true` 必须显式开**：Android 4.3 只认 JAR 签名（v1），
+  只开 v2 会「解析包时出现问题」。当前配置 v1 + v2 都开，v3/v4 不开（老系统不认）。
+- `release` buildType 必须 `isDebuggable = false` —— R8 才真正生效：
+  release 包 **3.1MB**，debug 包 4.15MB，差的这 1MB 就是没被优化掉的代码。
+- 新增 `lint { abortOnError = true; checkReleaseBuilds = true; disable += "ExpiredTargetSdkVersion" }`：
+  `targetSdk` 钉死 23、永远不上 Play，那条「targetSdk 过期」检查不适用，其余 lint 错误一律拦构建。
+  （真拦下过一个真问题：`DetailActivity.kt` 里 `epRow.setHasFixedSize(true)` 用在
+  `height=wrap_content`、高度随集数变的列表上。）
+- `tools/publish-release.ps1` 现在会校验三件事，任一不过直接 throw：
+  ① `apksigner verify --print-certs` 的 SHA-256 必须等于上表（防止漏配 `storeFile` 退回 debug 签名）；
+  ② `aapt dump badging` 输出里不能有 `application-debuggable`；
+  ③ 清单 versionCode 与 APK 实测一致。
+  另外默认还会把同一个包另存一份 `myembyhub-debug.apk` 一起上传（`-NoLegacyAlias` 可关），
+  让烤了旧资产名的老客户端至少还能下载到东西。
+- **签名换了之后本地装包要先 `adb uninstall`**，直接 `adb install -r` 会报签名不一致。
 
 ---
 
@@ -663,13 +883,32 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
 6. **HLS 播放** —— ⚠️ 未单独验证（媒体库主体是 mkv/mp4 直放，暂不需要）。
 7. **电视休眠时 adbd 是否断开** —— ✅ 深度待机时 5555 会关，需用户按遥控器唤醒（按「信号源」最有效）。
 
-### 8.2 现在还欠的（正式客户端）
+### 8.2 已在模拟器上验证（2026-11-19）
 
-1. 电视上点一次「在线更新 → 下载」—— 验证下载链路（权限坑已修，待真机确认）。
-2. 在电视上肉眼确认：媒体库有海报、进入剧集能播放出画面。
-3. 详情页（大图 + 简介 + 剧集列表）—— 等核心链路验顺后再议。
+- 播放页交互：**菜单键按一下出播放页菜单**（选集 / 字幕 / 诊断信息）/ 首页「继续观看」
+  进播放器后台补拉剧集列表 / 上下键切集 / 播完自动下一集（开关两态都验过）/
+  字幕默认关（截图对照：关时一个字没有，开后白字黑描边）。
+  见 [docs/player.md](docs/player.md)。
+- 长内容对话框可滚动：30 行长 notes 的检查更新框，初始焦点在「下载」、↑ 进内容区、
+  连按 ↓ 滚到底落到「稍后」，按钮没被顶出屏幕。
+- 首页「更多 ›」跳媒体库并选中对应库、焦点落在海报墙第 0 张（三层坑见第 6 节）。
+- `LibraryActivity` 已删除（新版首页 + 媒体库页覆盖了它的全部用途）。
+- 设置菜单四项：体验优化计划（双向读写 `play_stats_enabled`）/ TLS 实现三个子项 /
+  新域名先试系统库 / 已记录的域名（清空）。
+- 反馈上报脱敏 + `tls.implActual` + 内置对照（编号 #10 / #12）。
+- 正式 release 包冷启动无 `FATAL` / `NoSuchField` / `ClassNotFound`（R8 后反射链完好）。
+- 「检查更新」在最新版上回「没有新版本」。
+
+### 8.3 还欠的
+
+1. **真机（乐视电视）上的一切** —— 模拟器验不了：
+   - 4K HEVC 的「有声音没画面」提示是否按预期出现；
+   - ISO / BDMV 直放出画（模拟器只有 Baseline 软解）；
+   - 1080p 硬解播放流畅度。
+2. **电视上首次装 release 签名包必须 `adb uninstall` 再装**（签名跟旧 debug 包不一致），
+   而系统安装器那一步**只能人按遥控器**（`input` 从 shell 注入到别的 uid 窗口会被静默丢弃）。
+3. 电视休眠时 adbd 断开，要做真机验证得先按遥控器唤醒。
 4. **左栏「加载中被拉回」的修复待真机确认**（2026-11-09）：
    模拟器上复现不出真机那个「滚着滚着被拽回之前点的 tab」的现象
    （新旧写法在模拟器上表现一致），修复按框架源码的机制做的
    （见第 6 节「改选中态千万别用 `notifyItemChanged`」）。
-   → 真机验证要等电视唤醒（`192.168.1.100:5555` 深度待机时是关的）。
