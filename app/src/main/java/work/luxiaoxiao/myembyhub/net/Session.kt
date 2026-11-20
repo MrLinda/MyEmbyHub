@@ -94,6 +94,47 @@ class Session private constructor(private val sp: SharedPreferences) {
         get() = sp.getBoolean(KEY_PLAY_STATS, false)
         set(v) = sp.edit().putBoolean(KEY_PLAY_STATS, v).apply()
 
+    /**
+     * 播完自动播下一集。
+     *
+     * **默认开** —— 看剧的时候「一集播完自动接下一集」是绝大多数人的预期，
+     * 关着的话用户每集都得摸一次遥控器，那是把播放器当手动翻页器用。
+     *
+     * 只在**自然播到结尾**时触发（`STATE_ENDED`）：中途按返回、切集、
+     * 播放失败都不算，所以不会出现「我想退出却被塞了下一集」。
+     *
+     * 边界：已经是最后一集就正常结束，不会绕回第一集 —— 那会像卡在循环里。
+     */
+    var autoNextEpisode: Boolean
+        get() = sp.getBoolean(KEY_AUTO_NEXT, true)
+        set(v) = sp.edit().putBoolean(KEY_AUTO_NEXT, v).apply()
+
+    /**
+     * 播放时是否显示字幕。
+     *
+     * **默认关**。原因不是「省性能」，是**会重叠**：很多资源是压好的硬字幕
+     * （字幕直接烧在画面里），此时再把内嵌字幕轨渲染上来，屏幕上就是上下两行字，
+     * 而且内容常常还不一样（一条是压制组翻的，一条是原盘的）。
+     *
+     * 想看的用户在播放页菜单里打开即可（菜单里会列出这部片子实际有哪些字幕轨）。
+     * 这不是「全局偏好」而更接近「临时开关」—— 换一部片子到底要不要字幕，
+     * 取决于这部片子有没有硬字幕，所以设置页里不放它，只放播放页。
+     */
+    var subtitleEnabled: Boolean
+        get() = sp.getBoolean(KEY_SUBTITLE, false)
+        set(v) = sp.edit().putBoolean(KEY_SUBTITLE, v).apply()
+
+    /**
+     * 上次选中的字幕轨（`MediaTrackGroup` 里的下标）。
+     *
+     * -1 表示「没选过，交给 [com.google.android.exoplayer2.trackselection.DefaultTrackSelector]
+     * 自己挑第一条」。切集时轨道结构可能变（不同集的内嵌字幕条数不一定相同），
+     * 越界就当作没选过。
+     */
+    var subtitleTrackIndex: Int
+        get() = sp.getInt(KEY_SUBTITLE_TRACK, -1)
+        set(v) = sp.edit().putInt(KEY_SUBTITLE_TRACK, v).apply()
+
     val isLoggedIn: Boolean get() = token.isNotEmpty() && server.isNotEmpty()
 
     fun clear() {
@@ -110,6 +151,9 @@ class Session private constructor(private val sp: SharedPreferences) {
         private const val KEY_UPDATE_URL = "update_manifest_url"
         private const val KEY_FEEDBACK_URL = "feedback_url"
         private const val KEY_PLAY_STATS = "play_stats_enabled"
+        private const val KEY_AUTO_NEXT = "auto_next_episode"
+        private const val KEY_SUBTITLE = "subtitle_enabled"
+        private const val KEY_SUBTITLE_TRACK = "subtitle_track_index"
 
         /**
          * 默认的版本清单地址（GitHub Release 固定资产）。

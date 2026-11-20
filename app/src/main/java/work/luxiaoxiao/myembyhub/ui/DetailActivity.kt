@@ -335,7 +335,9 @@ class DetailActivity : Activity() {
 
         epRow.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         epRow.adapter = epAdapter
-        epRow.setHasFixedSize(true)
+        // ⚠️ 别加 setHasFixedSize(true)：`row_episodes` 是 height=wrap_content，
+        //    高度取决于有几集 → 内容变了尺寸就可能变，那个标志是在骗框架。
+        //    （lint 的 InvalidSetHasFixedSize 会直接让 assembleRelease 失败。）
         epRow.itemAnimator = null
     }
 
@@ -389,6 +391,20 @@ class DetailActivity : Activity() {
         i.putExtra(PlayerActivity.EXTRA_ITEM_ID, item.id)
         i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, mediaSourceId)
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
+        // 详情页手里已经有整季的剧集列表，直接传给播放器 ——
+        // 不传的话播放器还要「详情 → seriesId → 剧集列表」多跑两次请求，
+        // 而这两次正好落在用户第一次按上下键的时候，会看到「正在取剧集列表…」。
+        //
+        // 只在条目本身是「集」的时候传：点开一部电影也把空列表传过去没意义，
+        // 而传了空字符串和没传是一样的（播放器会当成「没有列表」）。
+        if (episodes.isNotEmpty()) {
+            i.putExtra(
+                PlayerActivity.EXTRA_EPISODES,
+                work.luxiaoxiao.myembyhub.net.EpisodeRef.encode(
+                    episodes.map { work.luxiaoxiao.myembyhub.net.EpisodeRef.of(it) }
+                )
+            )
+        }
         startActivityForResult(i, REQ_PLAY)
     }
 

@@ -1,16 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/surface_base">
 
+    <!-- app:use_controller="false"：不要 ExoPlayer 自带的那条控制栏。
+         它上面有 ⏮ ⏪ 播放 ⏩ ⏭ 五个按钮，而遥控器上：
+         ① 方向键全被 dispatchKeyEvent 吃掉，焦点根本走不到按钮上；
+         ② 电视没有触摸，点也点不了。
+         → 那五个按钮是**永远按不到的死按钮**，留着只会让人以为能按。
+         位置/时长改由 tv_seek 在按键时浮出（见 showSeekHint），
+         播放/暂停由确定键接管（见 PlayerActivity.togglePlayPause）。 -->
     <com.google.android.exoplayer2.ui.PlayerView
         android:id="@+id/player_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:focusable="true"
         android:focusableInTouchMode="true"
-        android:keepScreenOn="true" />
+        android:keepScreenOn="true"
+        app:use_controller="false" />
 
     <TextView
         android:id="@+id/tv_info"
@@ -71,8 +80,45 @@
 
     </LinearLayout>
 
+    <!-- 拖动进度时的位置提示（「▶ 08:42 / 45:10」）。
+         控制栏已经关掉了（见上面 player_view 的注释），位置只能靠它露一下 ——
+         按一下就消失，不挡正片。 -->
+    <TextView
+        android:id="@+id/tv_seek"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="120dp"
+        android:paddingLeft="28dp"
+        android:paddingRight="28dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="14dp"
+        android:background="@color/scrim_medium"
+        android:textColor="@color/content_primary"
+        android:textSize="26sp"
+        android:fontFamily="monospace"
+        android:visibility="gone" />
+
+    <!-- 暂停指示。控制栏关掉之后，按确定键暂停**屏幕上什么都不会变**
+         （画面本来就是静止的），必须自己给一个「已暂停」——
+         否则用户会以为按键没生效，或者以为卡死了。 -->
+    <TextView
+        android:id="@+id/tv_pause"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:paddingLeft="36dp"
+        android:paddingRight="36dp"
+        android:paddingTop="20dp"
+        android:paddingBottom="20dp"
+        android:background="@color/scrim_medium"
+        android:textColor="@color/content_primary"
+        android:textSize="34sp"
+        android:text="已暂停"
+        android:visibility="gone" />
+
     <!-- 解码诊断面板：黑屏时靠它一眼看出卡在哪一步（取流/解封装/解码器/首帧）。
-         默认隐藏，连按 MENU 或播放异常时出现。 -->
+         默认隐藏，连按三次 MENU 或播放异常时出现。 -->
     <TextView
         android:id="@+id/tv_diag"
         android:layout_width="match_parent"

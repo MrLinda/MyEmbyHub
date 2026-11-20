@@ -105,12 +105,15 @@ object TvMenu {
     /**
      * 弹出菜单，**选择后自动关闭**（适合「选了就跳走」的动作）。
      *
+     * @param maxHeightDp 列表最大高度（dp）。0 = 不限（沿用 wrap_content）。
+     *   集数多的剧集列表必须限高，否则面板会顶到屏幕外、连标题都看不见。
      * @param onDismiss 取消（按返回）时的回调
      */
     fun show(
         ctx: Context,
         title: String,
         items: List<Item>,
+        maxHeightDp: Int = 0,
         onDismiss: (() -> Unit)? = null
     ) {
         lateinit var dialog: Dialog
@@ -126,7 +129,7 @@ object TvMenu {
         adapter.bind(items)
         val (dlg, rv) = buildDialog(ctx, title, adapter, onDismiss)
         dialog = dlg
-        showDialog(dlg, rv, items)
+        showDialog(dlg, rv, items, maxHeightDp)
     }
 
     /**
@@ -161,7 +164,7 @@ object TvMenu {
         adapter.bind(provider())
         val (dlg, list) = buildDialog(ctx, title, adapter, onDismiss)
         rv = list
-        showDialog(dlg, rv, provider())
+        showDialog(dlg, rv, provider(), maxHeightDp = 0)
     }
 
     /**
@@ -181,7 +184,12 @@ object TvMenu {
         val view = LayoutInflater.from(ctx).inflate(R.layout.tv_menu_dialog, null, false)
         dialog.setContentView(view)
         view.findViewById<TextView>(R.id.tv_menu_title).text = title
-        dialog.setOnCancelListener { onDismiss?.invoke() }
+        // ⚠️ 用 setOnDismissListener，**不是** setOnCancelListener：
+        //    onCancel 只在「按返回 / 点外面」时触发；而菜单最常走的关闭方式是点某一项，
+        //    那条路是 adapter 里主动 dialog.dismiss() —— 挂在 onCancel 上就一次都不回调。
+        //    调用方的 onDismiss 是「关掉之后收尾」（放开焦点闸门、把焦点扶回去），
+        //    漏掉它 = 闸门永久关着，顶栏焦点不再跟随切页。
+        dialog.setOnDismissListener { onDismiss?.invoke() }
 
         val rv = view.findViewById<RecyclerView>(R.id.rv_menu)
         rv.layoutManager = LinearLayoutManager(ctx)
@@ -190,7 +198,7 @@ object TvMenu {
     }
 
     /** 显示对话框，并把焦点交给第一项（可用的那一项）。 */
-    private fun showDialog(dialog: Dialog, rv: RecyclerView, items: List<Item>) {
+    private fun showDialog(dialog: Dialog, rv: RecyclerView, items: List<Item>, maxHeightDp: Int) {
         // 窗口背景透明：只留自绘的面板，系统那个九宫格边框不要
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.show()
@@ -209,6 +217,19 @@ object TvMenu {
         // 宽度固定（电视上 1280dp 宽，菜单 560dp 刚好留出两边余量）
         val width = (560 * dialog.context.resources.displayMetrics.density).toInt()
         dialog.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+        // 登记到「还有窗口开着吗」里，供嵌套弹窗的收尾判断（见 PopupGate）
+        PopupGate.track(dialog)
+
+        // 限高：集数多的剧集列表不限高会把面板顶出屏幕（4.3 电视 720dp 高）。
+        // ⚠️ 必须在 dialog.show() 之后设：show() 之前拿不到最终可用高度，
+        //    而且窗口尺寸在 show() 期间会被重新计算一次，先设会被冲掉。
+        if (maxHeightDp > 0) {
+            val maxPx = (maxHeightDp * dialog.context.resources.displayMetrics.density).toInt()
+            rv.layoutParams = rv.layoutParams.apply { height = maxPx }
+            // 限高就说明内容大概率超一屏 → 给一条滚动条，否则用户不知道下面还有
+            rv.isVerticalScrollBarEnabled = true
+        }
 
         // 焦点给第一项：菜单刚弹出时不能一个高亮都没有，
         // 否则用户不知道方向键能往哪儿走。
