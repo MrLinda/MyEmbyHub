@@ -14,6 +14,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 
 /**
@@ -75,6 +76,19 @@ class ImageLoader private constructor(private val ctx: Context) {
          * 超了整体清空 —— 最坏只是多打几次 404，可接受。
          */
         private const val FAILED_MAX = 4000
+
+        /**
+         * 取图并发数。
+         *
+         * ⚠️ **从 3 降到 2**（2026-11-19）：这台电视是 MStar 双核 1GHz，
+         * 三路 JPEG 解码 + 网络会和 UI 线程抢 CPU，焦点移动时肉眼可见掉帧。
+         * 两路已经能喂满一块 1080p 屏幕的可见海报（一屏最多 8~12 张，
+         * 每张解码只要几毫秒），再多只是把战线拉长。
+         */
+        private const val POOL_SIZE = 2
+
+        /** 磁盘缓存文件名里要替换掉的字符；提成常量，别每次取图都 new 一个 Regex。 */
+        private val SAFE_CHARS = Regex("[^A-Za-z0-9_-]")
     }
 
     /** 回调。bitmap 为 null 表示没有图或加载失败。 */
@@ -111,7 +125,15 @@ class ImageLoader private constructor(private val ctx: Context) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
-    private val pool = Executors.newFixedThreadPool(3) as ThreadPoolExecutor
+    private val pool = Executors.newFixedThreadPool(POOL_SIZE, ThreadFactory { r ->
+        Thread({
+            // 后台优先级：解码/下载**永远不能盖过 UI 线程**。
+            // 不做这件事的话，滚动时 UI 线程要跟两三个正在解 JPEG 的线程抢那两颗核，
+            // 表现就是「手指/遥控器一动，画面就一卡一卡」（4.3 上实测）。
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            r.run()
+        }, "image-loader").apply { isDaemon = true }
+    }) as ThreadPoolExecutor
 
     /**
      * 取图失败的 key（该条目确实没有这张图）→ 不重复请求，避免滚动时反复打服务器。
@@ -175,7 +197,7 @@ class ImageLoader private constructor(private val ctx: Context) {
             // 进线程池再查一次：同一张图可能在排队期间已经被别的线程填好了
             var bmp = if (forceRefresh) null else memCache.get(key)
             if (bmp == null) {
-                bmp = loadFromDisk(key)
+                bmp = loadFromDisk(key, targetWidth)
                 if (bmp != null) {
                     memCache.put(key, bmp)
                 } else {
@@ -211,33 +233,50 @@ class ImageLoader private constructor(private val ctx: Context) {
         if (server.isEmpty()) return null
         // 服务端按显示尺寸出图，避免下原图
         val url = "$server/Items/$itemId/Images/$imageType?maxWidth=$targetWidth&quality=90&fillWidth=$targetWidth"
-        var conn: HttpURLConnection? = null
+        val host = try {
+            UrlKit.parse(server).host
+        } catch (e: Throwable) {
+            ""
+        }
         return try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8000
-                readTimeout = 15000
-                setRequestProperty("Accept", "image/*")
-                setRequestProperty("X-Emby-Token", Session.get(ctx).token)
-                if (this is javax.net.ssl.HttpsURLConnection) {
-                    // ⚠️ 同一个坑：必须抬到 TLS1.2，否则连不上（factory 已由 TlsStack 缓存复用）
-                    sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
-                        ?: return null
-                }
-            }
-            val code = conn.responseCode
-            if (code != 200) {
-                Log.w(TAG, "取图失败 HTTP $code: $url")
-                null
-            } else {
-                val bytes = conn.inputStream.use { readAll(it) }
-                decodeScaled(bytes, targetWidth)?.let { Fetched(it, bytes) }
+            // 海报墙是「一个域名几十张图」的形态：第一次谈不拢换栈并记下来，
+            // 后面每一张都直接走对的栈 —— 否则整墙图会集体超时。
+            TlsConn.withRetry(ctx, TrustMode.BUNDLED, host) { factory ->
+                attempt(url, targetWidth, factory)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "取图异常: ${e.message}")
             null
         }
+    }
+
+    /** 真发一次取图请求。[factory] 为 null 时走明文（一般是本地 http 源）。 */
+    private fun attempt(
+        url: String,
+        targetWidth: Int,
+        factory: javax.net.ssl.SSLSocketFactory?
+    ): Fetched? {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8000
+            readTimeout = 15000
+            setRequestProperty("Accept", "image/*")
+            setRequestProperty("X-Emby-Token", Session.get(ctx).token)
+            if (this is javax.net.ssl.HttpsURLConnection) {
+                // ⚠️ 同一个坑：必须抬到 TLS1.2，否则连不上（factory 已由 TlsStack 缓存复用）
+                sslSocketFactory = factory
+                    ?: TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
+                    ?: return null
+            }
+        }
+        val code = conn.responseCode
+        if (code != 200) {
+            Log.w(TAG, "取图失败 HTTP $code: $url")
+            return null
+        }
+        val bytes = conn.inputStream.use { readAll(it) }
         // ⚠️ 这里**不要** conn.disconnect()：它会把连接从池子里摘掉，
         //    之后的图又得重新 TCP + TLS 握手。读完流就能复用。
+        return decodeScaled(bytes, targetWidth)?.let { Fetched(it, bytes) }
     }
 
     /** 解码成缩放后的 RGB_565 位图。 */
@@ -279,7 +318,7 @@ class ImageLoader private constructor(private val ctx: Context) {
     // ---------- 磁盘缓存 ----------
 
     private fun diskFile(key: String): File {
-        val safe = key.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val safe = key.replace(SAFE_CHARS, "_")
         return File(diskDir, safe + ".jpg")
     }
 
@@ -299,12 +338,26 @@ class ImageLoader private constructor(private val ctx: Context) {
         }
     }
 
-    private fun loadFromDisk(key: String): Bitmap? {
+    private fun loadFromDisk(key: String, targetWidth: Int): Bitmap? {
         val f = diskFile(key)
         if (!f.exists() || f.length() == 0L) return null
         scanDiskOnce()
         val bmp = try {
-            val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+            // ⚠️ 磁盘缓存里存的是**原始 JPEG 字节**，尺寸取决于当时请求的 maxWidth。
+            //    换过取图宽度的老缓存（比如早期 320 的）如果原样解码，
+            //    在 96MB 堆上就是白占内存 —— 这里按目标宽度补一次采样解码。
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(f.absolutePath, bounds)
+            var sample = 1
+            while (targetWidth > 0 && bounds.outWidth > 0 &&
+                bounds.outWidth / sample > targetWidth && sample < 16
+            ) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.RGB_565
+                inSampleSize = sample
+            }
             BitmapFactory.decodeFile(f.absolutePath, opts)
         } catch (e: Throwable) {
             null
