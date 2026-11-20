@@ -154,19 +154,33 @@ class EmbyApi(
     }
 
     /**
-     * 列表接口要的字段（**不含 `Overview`**）。
+     * 列表接口要的字段（**不含 `Overview`、也不含 `MediaSources`**）。
      *
-     * 列表一页最多 200 条，而 `Overview`（简介）动辄几百字到几 KB，
-     * 拼进同一个响应会让 JSON 体积翻好几倍 —— 在 1GHz 的 MStar 上，
-     * 光是把这几百 KB 解析成 `JSONObject` 就要几百毫秒。
-     * 简介只有详情弹窗用得到，走 [itemDetail] 单独取。
+     * `Overview`（简介）动辄几百字到几 KB，只有详情弹窗用得到，走 [itemDetail] 单独取。
      *
-     * `UserData` 必须留（续播进度靠它），`MediaSources` 也必须留
-     * （取流要 `mediaSourceId`，副标题要编码/分辨率）。
+     * ⚠️ **`MediaSources` 也要从大列表里去掉**（2026-11-19）：
+     * 它不是「一个 id」，而是整个媒体源对象 —— 里面塞着 `MediaStreams` 数组
+     * （每条流十几个字段：编解码、分辨率、码率、语言、色彩空间……）、文件路径、
+     * 容器信息。一条片子光这一坨就有 1~3KB，海报墙一页 60 条就是几十上百 KB 的 JSON，
+     * 在 1GHz 的 MStar 上光解析就要好几百毫秒 —— 用户感受就是「翻页要顿一下」。
+     *
+     * 列表页其实**用不到**它：卡片只显示名字/年份/进度（`UserData`），
+     * 播放前各页都有「`mediaSourceId` 为空就补一次 [itemDetail]」的兜底
+     * （见 `HomeActivity.play` / `DetailActivity.startPlayback`）。
+     *
+     * 只有**详情页的剧集列表**（[episodes]）例外，见 [PLAYABLE_LIST_FIELDS]。
      */
     private val LIST_FIELDS =
         "Id,Name,Type,MediaType,IsFolder,Container,Size,ProductionYear,IndexNumber," +
-            "ParentIndexNumber,SeriesId,SeriesName,MediaSources,RunTimeTicks,UserData"
+            "ParentIndexNumber,SeriesId,SeriesName,RunTimeTicks,UserData"
+
+    /**
+     * 剧集列表用：多带一个 `MediaSources`。
+     *
+     * 详情页的「选集」是**点了就要立刻播**的场景，多一次往返就是多几百毫秒的黑屏，
+     * 而这批数据本身只有几十条（一季十几集），体积可以接受。
+     */
+    private val PLAYABLE_LIST_FIELDS = "$LIST_FIELDS,MediaSources"
 
     /**
      * 详情用：列表字段 + `Overview` + 分级/评分/类型。
@@ -175,7 +189,7 @@ class EmbyApi(
      * 每条都拖着 `Genres` 数组会让 JSON 明显变大（这台电视解析不起）。
      */
     private val DETAIL_FIELDS =
-        "$LIST_FIELDS,Overview,OfficialRating,CommunityRating,Genres"
+        "$PLAYABLE_LIST_FIELDS,Overview,OfficialRating,CommunityRating,Genres"
 
     /** 把 `{Items:[...]}` 解析成 [MediaItem] 列表。 */
     private fun parseItems(body: String, skipFolders: Boolean = false): List<MediaItem> {
@@ -351,7 +365,7 @@ class EmbyApi(
         return try {
             val resp = get(
                 "/Shows/$seriesId/Episodes?UserId=${uid()}&Limit=$limit" +
-                    "&SortBy=ParentIndexNumber,IndexNumber&Fields=$LIST_FIELDS"
+                    "&SortBy=ParentIndexNumber,IndexNumber&Fields=$PLAYABLE_LIST_FIELDS"
             )
             Result.success(parseItems(resp.body))
         } catch (e: Throwable) {
@@ -368,7 +382,7 @@ class EmbyApi(
     fun nextUp(seriesId: String): Result<MediaItem?> {
         return try {
             val resp = get(
-                "/Shows/NextUp?SeriesId=$seriesId&UserId=${uid()}&Limit=1&Fields=$LIST_FIELDS"
+                "/Shows/NextUp?SeriesId=$seriesId&UserId=${uid()}&Limit=1&Fields=$PLAYABLE_LIST_FIELDS"
             )
             Result.success(parseItems(resp.body).firstOrNull())
         } catch (e: Throwable) {
@@ -380,7 +394,7 @@ class EmbyApi(
     fun firstEpisode(seriesId: String): Result<MediaItem?> {
         return try {
             val resp = get(
-                "/Shows/$seriesId/Episodes?UserId=${uid()}&Limit=1&SortBy=IndexNumber&Fields=$LIST_FIELDS"
+                "/Shows/$seriesId/Episodes?UserId=${uid()}&Limit=1&SortBy=IndexNumber&Fields=$PLAYABLE_LIST_FIELDS"
             )
             Result.success(parseItems(resp.body).firstOrNull())
         } catch (e: Throwable) {
@@ -397,7 +411,7 @@ class EmbyApi(
      * ⚠️ **`mediaSourceId` 是必需的，不是「带上更稳」**（2026-11-05 实测更正）：
      * 少了它，`tv.example.com` 照样 302 到 `v10.example.com`，但 v10 直接回
      * `HTTP 404 Not Found`；补上就 200。所以调用方必须先保证这个值非空
-     * （见 `LibraryActivity.play()` 里的补取逻辑）。
+     * （见 `HomeActivity.play()` 里的补取逻辑）。
      *
      * @param mediaSourceId 覆盖条目自带的 mediaSourceId（补取到的值走这里传）。
      */
@@ -452,36 +466,61 @@ class EmbyApi(
     }
 
     private fun postJson(path: String, body: String) {
-        val conn = open(normalize(server) + path, "POST")
-        try {
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val code = conn.responseCode
-            if (code !in 200..299) Log.w(TAG, "POST $path → HTTP $code")
-            // 204 没有响应体，读一下把连接还回池子（读失败无所谓）
-            try { conn.inputStream.use { readAll(it) } } catch (ignored: Throwable) {}
-        } catch (e: Throwable) {
-            // 真出错时才主动断开，别让坏连接留在池子里
-            try { conn.disconnect() } catch (ignored: Throwable) {}
-            throw e
+        val url = normalize(server) + path
+        withTls(url) { factory ->
+            val conn = open(url, "POST", factory)
+            try {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                logTls(conn)
+                if (code !in 200..299) Log.w(TAG, "POST $path → HTTP $code")
+                // 204 没有响应体，读一下把连接还回池子（读失败无所谓）
+                try { conn.inputStream.use { readAll(it) } } catch (ignored: Throwable) {}
+            } catch (e: Throwable) {
+                // 真出错时才主动断开，别让坏连接留在池子里
+                try { conn.disconnect() } catch (ignored: Throwable) {}
+                throw e
+            }
+            // ⚠️ **成功时不要调 `conn.disconnect()`**：
+            //    disconnect() 会把 socket 直接关掉，连接池里的复用记录一并作废。
+            //    播放上报每 10 秒一次，每次都重新做 TCP + TLS 握手的话，
+            //    在这台 1GHz 的机器上光握手就要几百毫秒，还会白烧电。
+            //    正常读完响应体后不 disconnect，连接会自动回到池子里被下次复用。
+            //    （ImageLoader 里踩过同一个坑，那边注释也写了。）
         }
-        // ⚠️ **成功时不要调 `conn.disconnect()`**：
-        //    disconnect() 会把 socket 直接关掉，连接池里的复用记录一并作废。
-        //    播放上报每 10 秒一次，每次都重新做 TCP + TLS 握手的话，
-        //    在这台 1GHz 的机器上光握手就要几百毫秒，还会白烧电。
-        //    正常读完响应体后不 disconnect，连接会自动回到池子里被下次复用。
-        //    （ImageLoader 里踩过同一个坑，那边注释也写了。）
     }
 
     // ==================== 底层 HTTP ====================
 
     class Response(val code: Int, val body: String)
 
-    private fun open(url: String, method: String): java.net.HttpURLConnection {
+    /**
+     * 把这一跳实际谈成的协议与套件记一行日志。
+     *
+     * 为什么值得单独打：`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA` 和
+     * `…_CHACHA20_POLY1305_SHA256` 的区别，就是「走的是系统 JSSE 还是 Conscrypt」的
+     * 直接证据 —— 电视上没法截图，设置页写的「自动」也不说明实际用了谁，
+     * 只有这一行说得清。`HttpsURLConnection.getCipherSuite()` 是 API 1 就有的公开方法。
+     */
+    private fun logTls(conn: java.net.HttpURLConnection) {
+        if (conn !is HttpsURLConnection) return
+        try {
+            Log.d(TAG, "TLS ${conn.cipherSuite} @ ${conn.url.host}")
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    private fun open(
+        url: String,
+        method: String,
+        factory: javax.net.ssl.SSLSocketFactory? = null
+    ): java.net.HttpURLConnection {
         val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
         if (conn is HttpsURLConnection) {
-            conn.sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
+            conn.sslSocketFactory = factory
+                ?: TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
                 ?: throw java.io.IOException("无法构造 TLS socket factory")
         }
         conn.connectTimeout = 10000
@@ -493,23 +532,44 @@ class EmbyApi(
         return conn
     }
 
+    /**
+     * 跑一次 HTTPS 请求，**握手谈不拢时自动换 TLS 栈重试一次**。
+     *
+     * 换栈的结论会按域名记下来（见 [TlsHostMemory]），所以每个服务器
+     * 这辈子最多只付一次失败握手 —— 第一版登录、之后都不再付。
+     */
+    private fun <T> withTls(url: String, block: (javax.net.ssl.SSLSocketFactory?) -> T): T {
+        if (!url.startsWith("https", ignoreCase = true)) return block(null)
+        val host = try {
+            UrlKit.parse(url).host
+        } catch (e: Throwable) {
+            ""
+        }
+        if (host.isEmpty()) return block(null)
+        return TlsConn.withRetry(ctx, TrustMode.BUNDLED, host, block)
+    }
+
     private fun get(path: String): Response {
-        return try {
-            val conn = open(normalize(server) + path, "GET")
-            val code = conn.responseCode
-            if (code == 200) {
-                Response(code, conn.inputStream.use { readAll(it) })
-            } else {
-                throw IllegalStateException("HTTP $code ${readError(conn)}")
+        val url = normalize(server) + path
+        return withTls(url) { factory ->
+            try {
+                val conn = open(url, "GET", factory)
+                val code = conn.responseCode
+                logTls(conn)
+                if (code == 200) {
+                    Response(code, conn.inputStream.use { readAll(it) })
+                } else {
+                    throw IllegalStateException("HTTP $code ${readError(conn)}")
+                }
+            } catch (e: IOException) {
+                // ⚠️ Android 的坑：401 且无 WWW-Authenticate 头 → getResponseCode() 直接抛
+                //    "No authentication challenges found"，响应体读不到。
+                //    这里还原成明确的 401，避免把「密码错」误报成「网络失败」。
+                if (e.message?.contains("No authentication challenges") == true) {
+                    throw IllegalStateException("HTTP 401（token 无效或已过期）", e)
+                }
+                throw e
             }
-        } catch (e: IOException) {
-            // ⚠️ Android 的坑：401 且无 WWW-Authenticate 头 → getResponseCode() 直接抛
-            //    "No authentication challenges found"，响应体读不到。
-            //    这里还原成明确的 401，避免把「密码错」误报成「网络失败」。
-            if (e.message?.contains("No authentication challenges") == true) {
-                throw IllegalStateException("HTTP 401（token 无效或已过期）", e)
-            }
-            throw e
         }
     }
 
