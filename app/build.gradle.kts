@@ -40,6 +40,42 @@ val feedbackUrl = (project.findProperty("feedbackUrl") as String?)
     ?: localProps.getProperty("feedbackUrl")
     ?: ""
 
+// ============================================================================
+// 发布签名（release keystore）
+//
+// ⚠️ **不要用 debug.keystore 发版**。AGP 在 `~/.android/debug.keystore` 里随机生成
+// 一个，换机器 / 重装系统 / 删掉它 → 新包签名就变了 → 电视上覆盖安装直接失败
+// （INSTALL_FAILED_UPDATE_INCOMPATIBLE），只能卸载重装，登录态全丢。
+// 而且 debug 签名必然带 `android:debuggable=true`，任何能 adb 连上电视的人
+// 都能 `run-as <包名>` 读走 SharedPreferences 里的 Emby token。
+//
+// 密钥库位置：**仓库外的平级目录** `MyEmbyHub-keys/`（仓库是公开的，密钥不能进）。
+// 四个值都从 local.properties 读（该文件已 gitignore）：
+//   storeFile=...\myembyhub.jks
+//   storePassword=...
+//   keyAlias=myembyhub
+//   keyPassword=...
+//
+// 读不到就退回 debug 签名并打警告 —— 让「克隆下来随手编译」仍然可用，
+// 但发版脚本会因为这个警告 + 签名校验而拦住（见 tools/publish-release.ps1）。
+// ============================================================================
+// ⚠️ 变量名必须带前缀（rel*）：在 `signingConfigs { create("release") { ... } }`
+// 里面，接收者自己有 `storeFile` / `storePassword` / `keyAlias` / `keyPassword`
+// 四个属性，写成 `storePassword = storePassword` 会解析成**自赋值**，
+// 结果全留在 null，构建报 `Keystore file not set for signing config release`。
+val relStoreFile = (project.findProperty("storeFile") as String?)
+    ?: localProps.getProperty("storeFile")
+val relStorePassword = (project.findProperty("storePassword") as String?)
+    ?: localProps.getProperty("storePassword")
+val relKeyAlias = (project.findProperty("keyAlias") as String?)
+    ?: localProps.getProperty("keyAlias")
+val relKeyPassword = (project.findProperty("keyPassword") as String?)
+    ?: localProps.getProperty("keyPassword")
+val hasReleaseKey = !relStoreFile.isNullOrBlank()
+    && !relStorePassword.isNullOrBlank()
+    && !relKeyAlias.isNullOrBlank()
+    && file(relStoreFile).exists()
+
 /**
  * APK 的下载地址。
  *
@@ -48,9 +84,9 @@ val feedbackUrl = (project.findProperty("feedbackUrl") as String?)
  * 没有配仓库时退回本机静态服务，方便局域网调试。
  */
 val apkDownloadUrl = if (updateRepo.isBlank()) {
-    "http://$updateHost/myembyhub-debug.apk"
+    "http://$updateHost/myembyhub.apk"
 } else {
-    "https://github.com/$updateRepo/releases/latest/download/myembyhub-debug.apk"
+    "https://github.com/$updateRepo/releases/latest/download/myembyhub.apk"
 }
 
 /**
@@ -133,33 +169,73 @@ android {
         versionName = versionFull
     }
 
+    // ========================================================================
+    // Lint
+    //
+    // 这里只放**这台机器注定满足不了**的检查项，其余一律照常报错 ——
+    // lint 是真能抓出崩机的（比如 `InvalidSetHasFixedSize` 曾经让 release 打包失败，
+    // 但那条本身就是真问题：horizontal RecyclerView 的 height=wrap_content，
+    // 高度随集数变，`setHasFixedSize(true)` 是在骗框架）。
+    //
+    // ExpiredTargetSdkVersion：Google Play 要求 targetSdk ≥ 33。本 App 从来不上
+    // Play（目标设备连 GMS 都没有），而且 targetSdk 必须钉在 23 ——
+    // API 24+ 的行为变化（FileProvider、隐式广播、后台限制）会把 4.3 上的
+    // 外置存储写入和 adbd 安装链路搞坏。这条检查在这里永远不适用。
+    // ========================================================================
+    lint {
+        // 发版不能被「Google Play 上架要求」卡住，但真错误必须拦。
+        abortOnError = true
+        checkReleaseBuilds = true
+        disable += "ExpiredTargetSdkVersion"
+    }
+
     buildTypes {
         // ====================================================================
-        // 为什么要给 **debug** 也开 minify
+        // 交付物是 **release** 包（`app-release.apk` → `dist/myembyhub.apk`）。
         //
-        // 这个项目的交付物是 `dist/myembyhub-debug.apk`（在线更新清单里写的就是
-        // 这个名字），也就是说装到电视上的就是 debug 包。只给 release 开混淆，
-        // 对电视上真正跑的那个 APK 一点用都没有。
+        // 历史：早期一直发 debug 包，因为那时候只有 debug 能装上。代价是
+        // ① `android:debuggable=true`（adb 能 run-as 读走 token）
+        // ② 签名来自 ~/.android/debug.keystore（换机器就断更）
+        // ③ R8 的优化/混淆对 debuggable 构建整个关掉（构建日志会明确提示）
+        // 现在有固定 keystore 了，改回 release。
         //
-        // 开 minify 在这里的目的不是防反编译，而是**压 dex 体积**：
-        // 未混淆时 APK 里有 3 个 dex（3.41MB / 9.58MB / 2.39MB），
-        // 装机后 dalvik 要对每个 secondary dex 做 unzip + dexopt ——
-        // 模拟器上 classes2 单个就要 unzip 317ms + rewrite 455ms，真机更慢。
-        // 这直接影响「首次启动」和「每次覆盖安装后的第一次启动」。
-        //
-        // 需要快速迭代、不想等 R8 时：gradlew :app:assembleDebug -PnoMinify
+        // debug 构建保留原样（debug 签名 + debuggable），只给开发期用 ——
+        // `adb logcat` / `run-as` 调试要靠它。
         // ====================================================================
         val minify = !project.hasProperty("noMinify")
 
-        debug {
+        if (hasReleaseKey) {
+            signingConfigs {
+                create("release") {
+                    storeFile = file(relStoreFile!!)
+                    storePassword = relStorePassword
+                    keyAlias = relKeyAlias
+                    keyPassword = relKeyPassword ?: relStorePassword
+                    // v1 必须开：Android 4.3 只认 JAR 签名（v2 是 API 24 才有的）
+                    enableV1Signing = true
+                    enableV2Signing = true
+                }
+            }
+        }
+
+        release {
             isMinifyEnabled = minify
             isShrinkResources = minify
+            isDebuggable = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseKey) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "⚠️ local.properties 里没有 storeFile/storePassword/keyAlias，" +
+                        "release 包将退回 debug 签名（不可用于发版）。"
+                )
+            }
         }
-        release {
+        debug {
             isMinifyEnabled = minify
             isShrinkResources = minify
             proguardFiles(
@@ -224,6 +300,15 @@ dependencies {
 
     // 单元测试：目前只有 UrlKit 的回归测试（手写 URL / 重定向解析）
     testImplementation(libs.junit)
+    // org.json 的**纯 Java 实现**，只进测试类路径。
+    //
+    // 为什么需要：`org.json` 在 Android 上是系统自带的，但单元测试跑在 JVM 上，
+    // android.jar 里的 `JSONObject` / `JSONArray` 全是抛 "Stub!" 的桩
+    // （`isReturnDefaultValues = true` 只让它们返回默认值，等于什么都没做）。
+    // 凡是编解码 JSON 的纯逻辑（EpisodeRef、UpdateManager 的清单解析）在测试里
+    // 就会 NPE / 断言失败，而不是代码有问题。
+    // 打包进 APK 的是系统实现，这份依赖只在 testImplementation 里，不影响产物。
+    testImplementation("org.json:json:20240303")
 }
 
 // ============================================================================
@@ -233,13 +318,20 @@ dependencies {
 // 大于就下载 APK 并调起系统安装器。
 //
 // 两个地址怎么来的见文件开头 updateRepo / updateHost 那段。
-// 发版流程：把 dist/myembyhub-debug.apk 和 dist/version.json **都**上传到
+// 发版流程：把 dist/myembyhub.apk 和 dist/version.json **都**上传到
 // 同一个 GitHub Release（资产名不能改），客户端就能在线更新了。
 // 见 tools/publish-release.ps1。
+//
+// ⚠️ 这里挂的是 **assembleRelease**（历史上挂的是 assembleDebug）。
+//    早期只有 debug 包能装，交付物就是 `myembyhub-debug.apk`；
+//    现在有固定 keystore 了，交付物是签名过的 release 包，资产名 `myembyhub.apk`。
+//    老版本 App 里烤的是 `.../download/myembyhub-debug.apk`，所以发版脚本
+//    会**额外上传一份同名旧资产**，让它们至少还能下载到（虽然签名变了、
+//    装不上去，要卸载重装 —— 见 MyEmbyHub-keys/README.txt）。
 // ============================================================================
-tasks.matching { it.name == "assembleDebug" }.configureEach {
+tasks.matching { it.name == "assembleRelease" }.configureEach {
     doLast {
-        val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
+        val apk = layout.buildDirectory.file("outputs/apk/release/app-release.apk").get().asFile
         if (!apk.exists()) return@doLast
         val code = android.defaultConfig.versionCode
         val name = android.defaultConfig.versionName
@@ -252,7 +344,7 @@ tasks.matching { it.name == "assembleDebug" }.configureEach {
               "versionName": "$name",
               "url": "$apkDownloadUrl",
               "size": ${apk.length()},
-              "notes": "TV 客户端：扫码登录 / 搜索 / 排序 / 在线更新"
+              "notes": "播放页菜单改成菜单键按一下就出来：选集 / 字幕 / 诊断信息都在里面（以前是连按三次出诊断面板，调试用的那套提示已经删了）。字幕默认关掉——很多资源自带压好的硬字幕，再叠一层就是两行字；要看内嵌字幕在播放页菜单里开，那里会告诉你这部片子有几条内嵌轨。检查更新的弹框现在内容长了会自己滚，按钮不会被顶出屏幕，焦点默认落在按钮上。老的左栏列表界面已经删掉，首页每个区块右边的「更多 ›」直接跳到媒体库并选中对应的库。另外修了首页「更多 ›」点了没反应、以及切过去后焦点落在排序栏上的问题。"
             }
             """.trimIndent()
         )
@@ -266,3 +358,4 @@ kotlin {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }
 }
+
