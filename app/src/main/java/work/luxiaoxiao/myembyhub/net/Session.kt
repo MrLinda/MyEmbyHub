@@ -74,6 +74,26 @@ class Session private constructor(private val sp: SharedPreferences) {
     val feedbackEndpoint: String
         get() = feedbackUrl.ifEmpty { BuildConfig.FEEDBACK_URL }
 
+    /**
+     * 是否加入「体验优化计划」—— 也就是每次播放结束自动发一条性能打点
+     * （[PlayStats] → `/api/v1/play`）。
+     *
+     * **默认关**，必须用户自己去设置里打开。理由：
+     *
+     * - 这条链路**不弹框、不确认**，每次退出播放器就发一次。
+     *   默认开的话等于「用户从没同意过，但一直在发」，这个形态不能用 ——
+     *   哪怕发的内容只有首帧毫秒数和掉帧数。
+     * - 手动反馈（[DeviceReport]）是用户**主动点的**，那是另一条链路，
+     *   不受这个开关影响。
+     *
+     * ⚠️ 关的时候不能只在 [PlayStats.finish] 里 return：`begin()` 仍在被调用、
+     * `startedAt` 一直被刷新，用户在很久以后打开开关，第一次 `finish()`
+     * 会把那次陈年播放发出去。所以两处都要拦（见 PlayStats）。
+     */
+    var playStatsEnabled: Boolean
+        get() = sp.getBoolean(KEY_PLAY_STATS, false)
+        set(v) = sp.edit().putBoolean(KEY_PLAY_STATS, v).apply()
+
     val isLoggedIn: Boolean get() = token.isNotEmpty() && server.isNotEmpty()
 
     fun clear() {
@@ -89,6 +109,7 @@ class Session private constructor(private val sp: SharedPreferences) {
         private const val KEY_PASS = "password"
         private const val KEY_UPDATE_URL = "update_manifest_url"
         private const val KEY_FEEDBACK_URL = "feedback_url"
+        private const val KEY_PLAY_STATS = "play_stats_enabled"
 
         /**
          * 默认的版本清单地址（GitHub Release 固定资产）。

@@ -9,7 +9,7 @@
 <resources>
     <string name="feedback">反馈</string>
 
-    <string name="feedback_intro">会把设备信息一起带上：系统版本、屏幕、内存、网络、TLS 握手实测结果、解码器支持情况、最近一次播放的编码参数、最近几条错误。\n\n不含账号密码和片库内容。</string>
+    <string name="feedback_intro">会把设备信息一起带上：系统版本、屏幕、内存、网络、TLS 握手实测结果、解码器支持情况、最近一次播放的编码参数、最近几条错误。\n\nWi-Fi 名称、局域网 IP、DNS 都是打码后的样子（如 AB***、192.168.x.x），不含账号密码和片库内容。</string>
 
     <string name="feedback_note_hint">哪一步不对？播的哪部片？屏幕上显示了什么？</string>
 
@@ -17,6 +17,11 @@
     <string name="feedback_cancel">取消</string>
 
     <string name="feedback_collecting">正在采集设备信息…\n要实测 TLS 握手和建解码器，大约几秒</string>
+
+    <!-- 进度条右侧的百分比。单独一条是因为老机器上拼接字符串也要建对象，
+         每换一个阶段就拼一次没必要。 -->
+    <string name="feedback_percent">%1$d%%</string>
+    <string name="feedback_collect_tip">要实测 TLS 握手和建解码器，慢一点是正常的</string>
 
     <string name="feedback_ok">已收到，编号 #%1$d</string>
     <string name="feedback_failed">上报失败：%1$s</string>
