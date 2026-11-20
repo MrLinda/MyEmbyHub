@@ -426,25 +426,51 @@ class EmbyHttpDataSource(
         }
     }
 
-    /** 建立（TLS）连接。http 走明文，https 走系统 JSSE + 内置锚点。 */
+    /** 建立（TLS）连接。http 走明文，https 走内置锚点验签 + 按域名记录选栈。 */
     private fun openSocket(u: UrlKit.Parts, host: String, port: Int): Socket {
         if (u.scheme == "https") {
-            val factory = TlsStack.socketFactory(ctx, TrustMode.BUNDLED)
+            // 取流会 302 到 v10./v11. 这类分流节点，**每个域名都是一次独立判定**。
+            // 记录（TlsHostMemory）就是为了让每个节点最多只付一次失败握手。
+            val first = TlsStack.chooseFor(ctx, TrustMode.BUNDLED, host)
                 ?: throw IOException("无法构造 TLS socket factory")
-            // ⚠️ 只包 factory；这里拿到的是**真 socket**，直接设协议即可
-            val ssl = factory.createSocket() as SSLSocket
-            // ⚠️⚠️ 必须显式设 SNI！
-            //    无参 createSocket() 建出来的 socket 不带 SNI，
-            //    挂在 Cloudflare 前面的服务器会**直接拒握手**。
-            //    （业务接口走 HttpsURLConnection，libcore 内部会设，所以只有取流挂）
-            TlsStack.applyServerName(ssl, host)
-            ssl.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            ssl.startHandshake()
-            return ssl
+            try {
+                return tlsConnect(first.factory, host, port).also {
+                    TlsStack.noteSuccess(ctx, host, first.impl)
+                }
+            } catch (e: Throwable) {
+                if (!TlsStack.isHandshakeFailure(e)) throw e
+                Log.w(TAG, "$host 用 ${first.impl} 握手失败，换栈重试: ${e.message}")
+                val second = TlsStack.escalate(ctx, TrustMode.BUNDLED, first.impl) ?: throw e
+                return tlsConnect(second.factory, host, port).also {
+                    TlsStack.noteSuccess(ctx, host, second.impl)
+                }
+            }
         }
         val plain = Socket()
         plain.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
         return plain
+    }
+
+    /**
+     * 真建一条 TLS 连接（含握手）。
+     *
+     * ⚠️ 只包 factory，不包 socket：这里拿到的是**真 socket**，直接设协议/SNI 即可，
+     * 包装器若不转发 `connect()` 会让被包的 delegate 根本没连上（4.3 真机踩过）。
+     */
+    private fun tlsConnect(
+        factory: javax.net.ssl.SSLSocketFactory,
+        host: String,
+        port: Int
+    ): Socket {
+        val ssl = factory.createSocket() as SSLSocket
+        // ⚠️⚠️ 必须显式设 SNI！
+        //    无参 createSocket() 建出来的 socket 不带 SNI，
+        //    挂在 Cloudflare 前面的服务器会**直接拒握手**。
+        //    （业务接口走 HttpsURLConnection，libcore 内部会设，所以只有取流挂）
+        TlsStack.applyServerName(ssl, host)
+        ssl.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        ssl.startHandshake()
+        return ssl
     }
 
     /** 读响应头（状态行 + 头字段），body 直接接着 socket 流读。 */

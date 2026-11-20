@@ -88,7 +88,7 @@ object TlsStack {
      *      换一个新的就等于放弃 session resumption → 每张图都重新完整握手
      *      （RSA-2048 验签 + ECDHE，1GHz ARM 上纯软件算）。
      */
-    private val cache = HashMap<String, SSLSocketFactory>()
+    private val cache = HashMap<String, Choice>()
 
     /** 运行时是否真的成功构造过 Conscrypt factory（给设置页显示状态用）。 */
     @Volatile
@@ -101,9 +101,28 @@ object TlsStack {
 
     private const val PREFS = "myembyhub_tls"
     private const val KEY_IMPL = "impl"
+    private const val KEY_PROBE_SYSTEM = "probe_system_first"
 
     @Volatile
     private var pref: TlsImpl = TlsImpl.AUTO
+
+    /**
+     * 新域名（没有记录）先试系统 JSSE，握手失败再自动换 Conscrypt。
+     *
+     * **默认开**。理由：系统栈能用就该用它 —— Conscrypt 要映射 8MB 原生库、
+     * 首次调用还要加载 + JIT 预热，在这台 1.5GB / 96MB 堆的电视上是实打实的开销，
+     * 而且它是「平台自己在用的那条路」，出问题概率最低。
+     *
+     * 代价是每个**没见过的域名**第一次连接可能多付一次失败握手（1~3 秒）。
+     * 靠 [TlsHostMemory] 记住结论后，同一个域名只付一次 —— 实际就那几个域名
+     * （Emby 服务器 + 取流 / 海报所在主机），付完就没了。
+     *
+     * ⚠️ 别因为「Conscrypt 更现代」就反过来默认它：现代不等于这台机器上更省。
+     * 实测 `eb.atrct.cn` 两条栈都能连（系统栈走 TLSv1.2 + CBC），
+     * 这种情况用系统栈完全够，根本不需要把 Conscrypt 拉起来。
+     */
+    @Volatile
+    private var probeSystemFirst: Boolean = true
 
     /** 是否已经从 SharedPreferences 读回过（懒加载，第一次取 factory 时读）。 */
     @Volatile
@@ -116,9 +135,13 @@ object TlsStack {
      * 里显式初始化；重复调无害（设置页改完想立刻生效可以直接调）。
      */
     fun loadPref(ctx: Context) {
-        val raw = try {
+        val p = try {
             ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getString(KEY_IMPL, null)
+        } catch (e: Throwable) {
+            null
+        }
+        val raw = try {
+            p?.getString(KEY_IMPL, null)
         } catch (e: Throwable) {
             null
         }
@@ -127,10 +150,34 @@ object TlsStack {
             "system" -> TlsImpl.SYSTEM
             else -> TlsImpl.AUTO
         }
+        // 默认值 true：新装用户直接走「系统栈优先」。
+        // 已经手动存过 false 的用户保持 false —— 那是他自己选的，不该被默认值覆盖。
+        probeSystemFirst = try {
+            p?.getBoolean(KEY_PROBE_SYSTEM, true) ?: true
+        } catch (e: Throwable) {
+            true
+        }
         prefLoaded = true
     }
 
     fun pref(): TlsImpl = pref
+
+    /** 新域名是否先试系统 JSSE（见 [probeSystemFirst]）。 */
+    fun probeSystemFirst(ctx: Context): Boolean {
+        if (!prefLoaded) loadPref(ctx)
+        return probeSystemFirst
+    }
+
+    fun setProbeSystemFirst(ctx: Context, on: Boolean) {
+        probeSystemFirst = on
+        try {
+            ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_PROBE_SYSTEM, on).commit()
+        } catch (ignored: Throwable) {
+        }
+        // 记录里存的是「按当时策略试出来的结论」，策略变了就该重新试
+        TlsHostMemory.clear(ctx)
+    }
 
     /** 改实现并清缓存（缓存里存的是旧栈造出来的 factory，必须作废）。 */
     fun setPref(ctx: Context, impl: TlsImpl) {
@@ -151,6 +198,16 @@ object TlsStack {
     }
 
     /**
+     * 一次选择的结果：真正用上的 factory，以及它属于哪条栈。
+     *
+     * [impl] 是**实际生效**的实现，不是用户选的那个 —— 选 [TlsImpl.AUTO] 时
+     * 它只会是 CONSCRYPT 或 SYSTEM，这样上层要记「哪个域名用哪条栈」时有据可依。
+     */
+    class Choice(val factory: SSLSocketFactory, val impl: TlsImpl) {
+        override fun toString(): String = "Choice($impl)"
+    }
+
+    /**
      * 取 socket factory（按需构造一次，之后复用）。
      *
      * @param trust 信任模式
@@ -160,26 +217,114 @@ object TlsStack {
         ctx: Context,
         trust: TrustMode,
         impl: TlsImpl? = null
-    ): SSLSocketFactory? {
+    ): SSLSocketFactory? = choose(ctx, trust, impl)?.factory
+
+    /** 同 [socketFactory]，但把「实际用了哪条栈」一并交出去。 */
+    fun choose(
+        ctx: Context,
+        trust: TrustMode,
+        impl: TlsImpl? = null
+    ): Choice? {
         if (!prefLoaded) loadPref(ctx)
         val use = impl ?: pref
         val key = "$use:$trust"
         synchronized(cache) { cache[key]?.let { return it } }
         val built = build(ctx, trust, use) ?: return null
-        // Conscrypt 自带 1.2/1.3，不需要抬协议；系统栈要抬（4.3 默认只开 TLS 1.0）
-        val ready = if (use == TlsImpl.CONSCRYPT) built else forceTls12(built)
-        synchronized(cache) { cache[key] = ready }
-        return ready
+        val (f, actual) = built
+        // Conscrypt 自带 1.2/1.3，不需要抬协议；系统栈要抬（4.3 默认只开 TLS 1.0）。
+        // ⚠️ 判据必须是**实际**实现：AUTO 解析成 Conscrypt 时若还去 forceTls12，
+        //    会把 Conscrypt 的 TLS 1.3 一起关掉。
+        val ready = if (actual == TlsImpl.CONSCRYPT) f else forceTls12(f)
+        val choice = Choice(ready, actual)
+        synchronized(cache) { cache[key] = choice }
+        return choice
+    }
+
+    /**
+     * 按域名取 factory：**有记录按记录，没记录按策略**。
+     *
+     * 记录来自 [TlsHostMemory] —— 上一个连过这个域名的进程写下的结论。
+     * 这样「哪条栈跟它谈得拢」就是**已知**而不是每次重新猜。
+     */
+    fun chooseFor(ctx: Context, trust: TrustMode, host: String): Choice? {
+        if (!prefLoaded) loadPref(ctx)
+        val remembered = TlsHostMemory.recall(ctx, host)
+        if (remembered != null) {
+            val hit = choose(ctx, trust, remembered)
+            if (hit != null) return hit
+            // 记录过期（比如换了 ROM、Conscrypt 的 .so 没了）→ 丢掉重来
+            Log.w(TAG, "$host 的记录 $remembered 已不可用，重新判定")
+            TlsHostMemory.forget(ctx, host)
+        }
+        // 没记录：按策略决定第一次试哪条。
+        // probeSystemFirst 打开时先试系统栈（省 Conscrypt 原生库），
+        // 谈不拢由调用方 escalate 换栈 —— 代价只落在每个域名的第一次。
+        if (pref == TlsImpl.AUTO && probeSystemFirst) {
+            choose(ctx, trust, TlsImpl.SYSTEM)?.let { return it }
+        }
+        return choose(ctx, trust, pref)
+    }
+
+    /** 换到「另一条」栈。当前是 Conscrypt 就给系统 JSSE，反之亦然。 */
+    fun escalate(ctx: Context, trust: TrustMode, failed: TlsImpl): Choice? {
+        val other = if (failed == TlsImpl.CONSCRYPT) TlsImpl.SYSTEM else TlsImpl.CONSCRYPT
+        Log.i(TAG, "$failed 握手失败，换 $other 重试")
+        return choose(ctx, trust, other)
+    }
+
+    /** 记下「这个域名用这条栈能通」。失败路径不记，避免把偶发问题写死。 */
+    fun noteSuccess(ctx: Context, host: String, impl: TlsImpl) {
+        TlsHostMemory.remember(ctx, host, impl)
+    }
+
+    /**
+     * 这个异常是不是「TLS 谈不拢」。
+     *
+     * 换栈重试只对**握手层**的失败有意义：套件谈不拢、协议版本被拒、SNI 缺失。
+     * 证书校验失败、DNS 错、超时都不该换栈 —— 换了也是白试，还会掩盖真因。
+     *
+     * 4.3 上的实际文案很杂，逐个认：
+     * - `SSL handshake aborted` / `SSL handshake timeout`（Harmony 血统）
+     * - `javax.net.ssl.SSLHandshakeException` / `SSLException`（Conscrypt）
+     * - `Connection closed by peer`（对端 alert 40 之后直接断）
+     * - `Received fatal alert: handshake_failure`（BoringSSL）
+     */
+    fun isHandshakeFailure(t: Throwable): Boolean {
+        var cur: Throwable? = t
+        var depth = 0
+        while (cur != null && depth < 8) {
+            val name = cur.javaClass.name
+            val msg = cur.message ?: ""
+            if (name.contains("SSLHandshakeException")) return true
+            if (name.contains("CertificateException")) return false
+            val low = msg.lowercase()
+            if (low.contains("handshake") && !low.contains("certificate")) return true
+            if (low.contains("wrong version number")) return true
+            if (low.contains("connection closed by peer")) return true
+            if (low.contains("ssl3_get_record")) return true
+            cur = cur.cause
+            depth++
+        }
+        return false
     }
 
     private fun build(
         ctx: Context,
         trust: TrustMode,
         impl: TlsImpl
-    ): SSLSocketFactory? {
-        val tm: TrustManager = when (trust) {
-            TrustMode.ALL -> trustAll()
-            TrustMode.BUNDLED -> BundledCa.trustManager(ctx)
+    ): Pair<SSLSocketFactory, TlsImpl>? {
+        // ⚠️ 信任管理器要单独兜住：`BundledCa.trustManager` 解析内置 PEM 失败，
+        //    和「Conscrypt 能不能用」是**两件事**。以前两者的异常都落到
+        //    `conscryptOk = false` 上，于是证书库的问题会被误报成「Conscrypt 不可用」，
+        //    把排查方向直接带偏。
+        val tm: TrustManager = try {
+            when (trust) {
+                TrustMode.ALL -> trustAll()
+                TrustMode.BUNDLED -> BundledCa.trustManager(ctx)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "信任管理器构造失败（$trust）: ${e.javaClass.simpleName}: ${e.message}")
+            return null
         }
         if (impl != TlsImpl.SYSTEM) {
             conscrypt(tm)?.let {
@@ -187,7 +332,7 @@ object TlsStack {
                 // 只能靠 logcat 认（`adb logcat -s TlsStack`）。
                 if (conscryptOk != true) Log.i(TAG, "TLS 使用 Conscrypt（GCM/ChaCha20 可用）")
                 conscryptOk = true
-                return it
+                return it to TlsImpl.CONSCRYPT
             }
             conscryptOk = false
             if (impl == TlsImpl.CONSCRYPT) {
@@ -199,8 +344,9 @@ object TlsStack {
         return try {
             val c = SSLContext.getInstance("TLS")
             c.init(null, arrayOf(tm), SecureRandom())
-            c.socketFactory as SSLSocketFactory
+            (c.socketFactory as SSLSocketFactory) to TlsImpl.SYSTEM
         } catch (e: Throwable) {
+            Log.w(TAG, "系统 JSSE 构造失败: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }

@@ -369,13 +369,18 @@ class UpdateManager(private val ctx: Context) {
         var downloaded = 0L
         var total = release.size
         var round = 0
+        // 大文件动辄几十 MB，每轮续传都重新握手，所以先把栈选好复用；
+        // 万一这一轮握手谈不拢，就换栈接着下（已下载的字节不用重来）。
+        val host = hostOf(url)
+        var choice = if (host.isNotEmpty()) TlsStack.chooseFor(ctx, TrustMode.ALL, host) else null
+        var escalated = false
 
         while (round < MAX_RESUME_ROUNDS) {
             round++
             var conn: HttpURLConnection? = null
             try {
                 Log.i(TAG, "开始下载 $url（第 $round 轮，已有 $downloaded 字节）")
-                conn = openHttp(url)
+                conn = openHttp(url, choice?.factory)
                 if (downloaded > 0) conn.setRequestProperty("Range", "bytes=$downloaded-")
                 val code = conn.responseCode
                 if (code != 200 && code != 206) {
@@ -420,13 +425,31 @@ class UpdateManager(private val ctx: Context) {
                 val complete = if (total > 0) downloaded >= total else !broken
                 if (complete) {
                     target.setReadable(true, false)
+                    if (choice != null && host.isNotEmpty()) {
+                        TlsStack.noteSuccess(ctx, host, choice!!.impl)
+                    }
                     return target.absolutePath
                 }
                 // 一个字节都没拿到，说明这个地址根本不通，别在这儿耗
                 if (downloaded == 0L) return null
             } catch (e: Throwable) {
                 Log.w(TAG, "下载异常 $url: ${e.javaClass.simpleName}: ${e.message}")
-                if (downloaded == 0L) return null
+                // 握手谈不拢（只开 GCM 的镜像站）+ 还没换过栈 → 换一个栈接着下。
+                // ⚠️ 只换握手失败，证书/超时/DNS 换了也没用（见 TlsStack.isHandshakeFailure）。
+                if (!escalated && TlsStack.isHandshakeFailure(e)) {
+                    val failed = choice?.impl ?: TlsStack.choose(ctx, TrustMode.ALL)?.impl
+                    val alt = failed?.let { TlsStack.escalate(ctx, TrustMode.ALL, it) }
+                    if (alt != null) {
+                        escalated = true
+                        choice = alt
+                        Log.w(TAG, "握手失败，换 TLS 栈重试：$failed → ${alt.impl}")
+                    }
+                }
+                if (downloaded == 0L) {
+                    // 一个字节都没拿到通常是握手/地址问题，换栈这一次机会已经给了，
+                    // 再空转一轮没意义 —— 但若刚换过栈，得让下一轮真的试一次。
+                    if (!escalated) return null
+                }
             } finally {
                 try { conn?.disconnect() } catch (ignored: Throwable) {}
             }
@@ -448,10 +471,11 @@ class UpdateManager(private val ctx: Context) {
      * 而下载下来的 APK 还要过系统安装器的签名校验 ——
      * 签名对不上的包**装不上**，所以这里放宽证书不会让人顶掉本 App。
      */
-    private fun openHttp(url: String): HttpURLConnection {
+    private fun openHttp(url: String, factory: javax.net.ssl.SSLSocketFactory? = null): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         if (conn is javax.net.ssl.HttpsURLConnection) {
-            conn.sslSocketFactory = TlsStack.socketFactory(ctx, TrustMode.ALL)
+            conn.sslSocketFactory = factory
+                ?: TlsStack.socketFactory(ctx, TrustMode.ALL)
                 ?: throw java.io.IOException("无法构造 TLS socket factory")
         }
         conn.connectTimeout = CONNECT_TIMEOUT
@@ -468,9 +492,17 @@ class UpdateManager(private val ctx: Context) {
         return conn
     }
 
-    /** 取一段文本（清单用）。 */
+    /** 取一段文本（清单用）。握手谈不拢就换栈再试一次（见 [TlsConn]）。 */
     private fun fetchText(url: String): String {
-        val conn = openHttp(url)
+        val host = hostOf(url)
+        if (!url.startsWith("https", ignoreCase = true) || host.isEmpty()) {
+            return fetchTextOnce(url, null)
+        }
+        return TlsConn.withRetry(ctx, TrustMode.ALL, host) { factory -> fetchTextOnce(url, factory) }
+    }
+
+    private fun fetchTextOnce(url: String, factory: javax.net.ssl.SSLSocketFactory?): String {
+        val conn = openHttp(url, factory)
         try {
             val code = conn.responseCode
             if (code != 200) throw IllegalStateException("HTTP $code")
@@ -479,6 +511,13 @@ class UpdateManager(private val ctx: Context) {
             // 一次性的小请求，读完就断，别把连接池占着
             try { conn.disconnect() } catch (ignored: Throwable) {}
         }
+    }
+
+    /** 从 URL 里取主机名；解析不出来返回空串（调用方据此跳过换栈逻辑）。 */
+    private fun hostOf(url: String): String = try {
+        UrlKit.parse(url).host
+    } catch (ignored: Throwable) {
+        ""
     }
 
     /** 调起系统安装器装 APK。 */
