@@ -73,7 +73,9 @@ class LoadingOrbit @JvmOverloads constructor(
     }
 
     private fun startIfVisible() {
-        if (visibility == VISIBLE && !animator.isStarted) animator.start()
+        // 用 isShown 而不是 visibility：父容器 GONE 时自身 visibility 仍是 VISIBLE，
+        // 只判自身会导致隐藏的加载圈在后台 60fps 空转。
+        if (isShown && windowVisibility == VISIBLE && !animator.isStarted) animator.start()
     }
 
     private fun stop() {
@@ -83,6 +85,11 @@ class LoadingOrbit @JvmOverloads constructor(
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
+        if (isShown && windowVisibility == VISIBLE) startIfVisible() else stop()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
         if (visibility == VISIBLE) startIfVisible() else stop()
     }
 

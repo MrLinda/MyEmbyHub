@@ -157,6 +157,9 @@ class ImageLoader private constructor(private val ctx: Context) {
     private var diskBytes = 0L
     private var diskScanned = false
 
+    private val inFlightLock = Any()
+    private val inFlight = HashMap<String, ArrayList<Pair<Request, Callback>>>()
+
     /**
      * 取一张海报。
      *
@@ -190,35 +193,81 @@ class ImageLoader private constructor(private val ctx: Context) {
                 callback.onBitmap(null)
                 return req
             }
+            val joined = synchronized(inFlightLock) {
+                val existing = inFlight[key]
+                if (existing != null) {
+                    existing.add(req to callback)
+                    true
+                } else {
+                    inFlight[key] = ArrayList<Pair<Request, Callback>>(2).apply { add(req to callback) }
+                    false
+                }
+            }
+            if (joined) return req
         }
 
         pool.execute {
-            // 排队期间可能已经被取消（用户已经滚走了），没必要再占网络和 CPU
-            if (req.cancelled) return@execute
-            // 进线程池再查一次：同一张图可能在排队期间已经被别的线程填好了
-            var bmp = if (forceRefresh) null else memCache.get(key)
-            if (bmp == null) {
-                bmp = loadFromDisk(key, targetWidth)
-                if (bmp != null) {
-                    memCache.put(key, bmp)
+            var result: Bitmap? = null
+            var cancelledAll = false
+            try {
+                if (forceRefresh) {
+                    if (req.cancelled) {
+                        cancelledAll = true
+                        return@execute
+                    }
                 } else {
-                    if (req.cancelled) return@execute
-                    val fetched = fetch(itemId, imageType, targetWidth)
-                    if (fetched != null) {
-                        bmp = fetched.bitmap
-                        memCache.put(key, fetched.bitmap)
-                        saveToDisk(key, fetched.bytes)
+                    val anyActive = synchronized(inFlightLock) {
+                        inFlight[key]?.any { !it.first.cancelled } ?: false
+                    }
+                    if (!anyActive) {
+                        cancelledAll = true
+                        return@execute
+                    }
+                }
+
+                // 进线程池再查一次：同一张图可能在排队期间已经被别的线程填好了
+                var bmp = if (forceRefresh) null else memCache.get(key)
+                if (bmp == null) {
+                    bmp = loadFromDisk(key, targetWidth)
+                    if (bmp != null) {
+                        memCache.put(key, bmp)
+                    } else {
+                        val stillNeeded = if (forceRefresh) !req.cancelled else synchronized(inFlightLock) {
+                            inFlight[key]?.any { !it.first.cancelled } ?: false
+                        }
+                        if (!stillNeeded) {
+                            cancelledAll = true
+                            return@execute
+                        }
+                        val fetched = fetch(itemId, imageType, targetWidth)
+                        if (fetched != null) {
+                            bmp = fetched.bitmap
+                            memCache.put(key, fetched.bitmap)
+                            saveToDisk(key, fetched.bytes)
+                        }
+                    }
+                }
+                result = bmp
+                if (result == null) {
+                    synchronized(failed) {
+                        if (failed.size >= FAILED_MAX) failed.clear()
+                        failed.add(key)
+                    }
+                }
+            } finally {
+                val waiters = if (forceRefresh) {
+                    if (cancelledAll) null else listOf(req to callback)
+                } else {
+                    synchronized(inFlightLock) { inFlight.remove(key) }
+                }
+                if (!cancelledAll && waiters != null) {
+                    main.post {
+                        for ((r, cb) in waiters) {
+                            if (!r.cancelled) cb.onBitmap(result)
+                        }
                     }
                 }
             }
-            val result = bmp
-            if (result == null) {
-                synchronized(failed) {
-                    if (failed.size >= FAILED_MAX) failed.clear()
-                    failed.add(key)
-                }
-            }
-            main.post { if (!req.cancelled) callback.onBitmap(result) }
         }
         return req
     }
@@ -232,8 +281,8 @@ class ImageLoader private constructor(private val ctx: Context) {
     private fun fetch(itemId: String, imageType: String, targetWidth: Int): Fetched? {
         val server = Session.get(ctx).server
         if (server.isEmpty()) return null
-        // 服务端按显示尺寸出图，避免下原图
-        val url = "$server/Items/$itemId/Images/$imageType?maxWidth=$targetWidth&quality=90&fillWidth=$targetWidth"
+        // 服务端按显示尺寸出图，避免下原图；缩略图用 q80 兼顾清晰度与带宽/磁盘
+        val url = "$server/Items/$itemId/Images/$imageType?maxWidth=$targetWidth&quality=80&fillWidth=$targetWidth"
         val host = try {
             UrlKit.parse(server).host
         } catch (e: Throwable) {
@@ -274,7 +323,7 @@ class ImageLoader private constructor(private val ctx: Context) {
             Log.w(TAG, "取图失败 HTTP $code: $url")
             return null
         }
-        val bytes = conn.inputStream.use { readAll(it) }
+        val bytes = conn.inputStream.use { readAll(it, conn.contentLength) }
         // ⚠️ 这里**不要** conn.disconnect()：它会把连接从池子里摘掉，
         //    之后的图又得重新 TCP + TLS 握手。读完流就能复用。
         return decodeScaled(bytes, targetWidth)?.let { Fetched(it, bytes) }
@@ -305,8 +354,9 @@ class ImageLoader private constructor(private val ctx: Context) {
         }
     }
 
-    private fun readAll(input: InputStream): ByteArray {
-        val out = ByteArrayOutputStream(32 * 1024)
+    private fun readAll(input: InputStream, contentLength: Int = -1): ByteArray {
+        val initial = if (contentLength in 1..(2 * 1024 * 1024)) contentLength else 32 * 1024
+        val out = ByteArrayOutputStream(initial)
         val buf = ByteArray(16 * 1024)
         while (true) {
             val n = input.read(buf)
@@ -376,9 +426,18 @@ class ImageLoader private constructor(private val ctx: Context) {
     private fun saveToDisk(key: String, bytes: ByteArray) {
         scanDiskOnce()
         val f = diskFile(key)
+        val tmp = File(diskDir, "${f.name}.${Thread.currentThread().id}.tmp")
         try {
-            FileOutputStream(f).use { it.write(bytes) }
+            FileOutputStream(tmp).use { it.write(bytes) }
+            if (!tmp.renameTo(f)) {
+                f.delete()
+                if (!tmp.renameTo(f)) {
+                    tmp.delete()
+                    return
+                }
+            }
         } catch (e: Throwable) {
+            tmp.delete()
             // 磁盘缓存失败无所谓
             return
         }

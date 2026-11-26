@@ -29,7 +29,9 @@ import androidx.recyclerview.widget.RecyclerView
 import work.luxiaoxiao.myembyhub.BuildConfig
 import work.luxiaoxiao.myembyhub.R
 import work.luxiaoxiao.myembyhub.net.EmbyApi
+import work.luxiaoxiao.myembyhub.net.EmbyHttpDataSource
 import work.luxiaoxiao.myembyhub.net.ErrorLog
+import work.luxiaoxiao.myembyhub.net.ImageLoader
 import work.luxiaoxiao.myembyhub.net.MediaItem
 import work.luxiaoxiao.myembyhub.net.PhoneControlServer
 import work.luxiaoxiao.myembyhub.net.QrUtil
@@ -38,7 +40,9 @@ import work.luxiaoxiao.myembyhub.net.SortOption
 import work.luxiaoxiao.myembyhub.net.TlsHostMemory
 import work.luxiaoxiao.myembyhub.net.TlsStack
 import work.luxiaoxiao.myembyhub.net.friendlyError
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /**
  * 主界面（电视端）：**顶部 tab + 三个页面**。
@@ -196,6 +200,8 @@ class HomeActivity : Activity() {
 
     private val homeRows = ArrayList<RecyclerView>()
     private val homeRowOrder = ArrayList<Int>()
+    /** 首页多排卡片共用同一个视图布局，共享回收池减少 ViewHolder 实例。 */
+    private val homePosterPool = RecyclerView.RecycledViewPool().apply { setMaxRecycledViews(0, 18) }
 
     /**
      * 从详情页返回时要恢复焦点的条目 id。
@@ -274,7 +280,15 @@ class HomeActivity : Activity() {
     private lateinit var api: EmbyApi
     private lateinit var session: Session
 
-    private val worker = Executors.newSingleThreadExecutor()
+    private fun newBackgroundPool(threads: Int, name: String): ThreadPoolExecutor =
+        ThreadPoolExecutor(threads, threads, 30L, TimeUnit.SECONDS, LinkedBlockingQueue()) { r ->
+            Thread({
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                r.run()
+            }, name).apply { isDaemon = true }
+        }.apply { allowCoreThreadTimeOut(true) }
+
+    private val worker = newBackgroundPool(1, "home-worker")
     private val main = Handler(Looper.getMainLooper())
 
     /**
@@ -285,7 +299,7 @@ class HomeActivity : Activity() {
      * 这里只服务「按库取 20 条」这一件事，最多同时两路 ——
      * MStar 双核 1GHz，再多开也只是互相抢，而且这台电视挂不住三四个响应体。
      */
-    private val rowPool = Executors.newFixedThreadPool(2)
+    private val rowPool = newBackgroundPool(2, "home-rows")
 
     /**
      * 首页的「代」。每次 [loadHome] 自增，回调里对不上就整块丢弃。
@@ -751,7 +765,8 @@ class HomeActivity : Activity() {
         rv.clipToPadding = false
         rv.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         rv.setHasFixedSize(true)
-        rv.setItemViewCacheSize(6)
+        rv.setRecycledViewPool(homePosterPool)
+        rv.setItemViewCacheSize(4)
         // 默认动画在切换数据时会闪一下
         rv.itemAnimator = null
 
@@ -1939,6 +1954,8 @@ class HomeActivity : Activity() {
 
     private fun confirmLogout() {
         TvDialog.confirm(this, "退出登录", "确定要退出当前账号吗？", "退出", "取消") {
+            EmbyHttpDataSource.clearIdlePool()
+            ImageLoader.get(this).clearMemCache()
             session.clear()
             startActivity(Intent(this, LoginActivity::class.java))
             finish()
@@ -2042,6 +2059,16 @@ class HomeActivity : Activity() {
             // 这期间焦点多半被系统塞给了第一个 tab，扶回当前页内容区
             if (tabIndex == 2) searchBox.requestFocus() else focusContentOf(tabIndex)
         }, 120)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        ImageLoader.get(this).trimMemory(level)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        ImageLoader.get(this).clearMemCache()
     }
 
     override fun onDestroy() {
