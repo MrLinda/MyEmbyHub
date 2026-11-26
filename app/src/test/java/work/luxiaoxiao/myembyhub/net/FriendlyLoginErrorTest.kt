@@ -59,6 +59,14 @@ class FriendlyLoginErrorTest {
         assertTrue(isAuthExpired(IllegalStateException("HTTP 401 ")))
         assertTrue(isAuthExpired(IOException("No authentication challenges found")))
         assertTrue(isAuthExpired(RuntimeException("outer", IOException("No authentication challenges found"))))
+        assertTrue(
+            isAuthExpired(
+                RuntimeException(
+                    "Source error",
+                    IOException("HTTP 401 HTTP/1.1 401 Unauthorized  ← https://tv.example.com/Videos/1/stream")
+                )
+            )
+        )
 
         assertFalse(isAuthExpired(null))
         assertFalse(isAuthExpired(IllegalStateException("HTTP 403 Forbidden")))

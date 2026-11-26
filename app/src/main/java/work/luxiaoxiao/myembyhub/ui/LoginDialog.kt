@@ -38,12 +38,12 @@ object LoginDialog {
         activity: Activity,
         statusHint: String? = null,
         onLoggedIn: () -> Unit,
-        onCancelExit: () -> Unit
+        onClose: () -> Unit = {}
     ): Dialog {
         val dialog = Dialog(activity, R.style.Theme_MyEmbyHub_Dialog)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(R.layout.dialog_login)
-        dialog.setCancelable(false)
+        dialog.setCancelable(true)
         dialog.setCanceledOnTouchOutside(false)
 
         val etServer = dialog.findViewById<EditText>(R.id.et_server)
@@ -52,6 +52,7 @@ object LoginDialog {
         val btnLogin = dialog.findViewById<TextView>(R.id.btn_login)
         val btnRememberPass = dialog.findViewById<TextView>(R.id.btn_remember_pass)
         val btnQrRefresh = dialog.findViewById<TextView>(R.id.btn_qr_refresh)
+        val btnClose = dialog.findViewById<TextView>(R.id.btn_login_close)
         val tvStatus = dialog.findViewById<TextView>(R.id.tv_status)
         val imgQr = dialog.findViewById<ImageView>(R.id.img_qr)
         val tvQrUrl = dialog.findViewById<TextView>(R.id.tv_qr_url)
@@ -79,6 +80,7 @@ object LoginDialog {
 
         var loginServer: PhoneControlServer? = null
         var dismissed = false
+        var loggedIn = false
 
         fun snapshotDraft() {
             draftRef.set(
@@ -120,6 +122,7 @@ object LoginDialog {
 
         fun completeLogin() {
             if (dismissed) return
+            loggedIn = true
             stopPhoneLogin()
             dialog.dismiss()
             onLoggedIn()
@@ -250,6 +253,7 @@ object LoginDialog {
                     }.onFailure { e ->
                         tvStatus.text = activity.getString(R.string.login_failed) + "：" +
                             friendlyLoginError(e)
+                        btnLogin.requestFocus()
                     }
                 }
             }
@@ -279,6 +283,10 @@ object LoginDialog {
         }
         btnLogin.setOnClickListener { doLogin() }
         btnQrRefresh.setOnClickListener { startPhoneLogin() }
+        btnClose.setOnClickListener {
+            stopPhoneLogin()
+            dialog.dismiss()
+        }
 
         btnQrRefresh.setOnKeyListener { _, keyCode, event ->
             if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
@@ -297,25 +305,12 @@ object LoginDialog {
             }
         }
 
-        dialog.setOnKeyListener { _, keyCode, event ->
-            if (keyCode == KeyEvent.KEYCODE_BACK &&
-                event.action == KeyEvent.ACTION_UP &&
-                !event.isCanceled
-            ) {
-                stopPhoneLogin()
-                dialog.dismiss()
-                onCancelExit()
-                true
-            } else {
-                false
-            }
-        }
-
         dialog.setOnDismissListener {
             dismissed = true
             loginServer?.stop()
             loginServer = null
             worker.shutdownNow()
+            if (!loggedIn) onClose()
         }
 
         startPhoneLogin()
@@ -334,13 +329,22 @@ object LoginDialog {
             w.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             w.setDimAmount(0.72f)
+            w.setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+            )
+            @Suppress("DEPRECATION")
+            w.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LOW_PROFILE
             w.setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN or
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
             )
         }
         PopupGate.track(dialog)
-        btnQrRefresh.post { btnQrRefresh.requestFocus() }
+        btnQrRefresh.post { if (!dismissed) btnQrRefresh.requestFocus() }
         return dialog
     }
 }

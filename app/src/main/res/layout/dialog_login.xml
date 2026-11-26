@@ -38,13 +38,33 @@
             android:textStyle="bold" />
 
         <TextView
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginLeft="14dp"
+            android:layout_weight="1"
             android:ellipsize="end"
             android:singleLine="true"
             android:text="@string/login_subtitle"
             android:textColor="@color/content_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/btn_login_close"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginLeft="12dp"
+            android:background="@drawable/bg_login_btn_secondary"
+            android:clickable="true"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:gravity="center"
+            android:nextFocusDown="@+id/et_server"
+            android:nextFocusLeft="@+id/btn_qr_refresh"
+            android:paddingLeft="14dp"
+            android:paddingRight="14dp"
+            android:singleLine="true"
+            android:text="@string/login_close"
+            android:textColor="@color/dialog_btn_text_secondary"
             android:textSize="13sp" />
     </LinearLayout>
 
@@ -123,6 +143,7 @@
                 android:gravity="center"
                 android:minWidth="156dp"
                 android:nextFocusRight="@+id/et_server"
+                android:nextFocusUp="@+id/btn_login_close"
                 android:paddingLeft="20dp"
                 android:paddingRight="20dp"
                 android:singleLine="true"
@@ -166,6 +187,7 @@
                 android:inputType="textUri"
                 android:nextFocusDown="@+id/et_user"
                 android:nextFocusLeft="@+id/btn_qr_refresh"
+                android:nextFocusUp="@+id/btn_login_close"
                 android:paddingLeft="12dp"
                 android:paddingRight="12dp"
                 android:singleLine="true"

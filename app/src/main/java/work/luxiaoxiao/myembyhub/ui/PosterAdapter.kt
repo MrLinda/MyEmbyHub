@@ -38,7 +38,8 @@ class PosterAdapter(
     private val firstColumnCount: Int = 1,
     private val onLeftFromFirstColumn: (() -> Boolean)? = null,
     private val onRightFromLastCard: ((Int) -> Boolean)? = null,
-    private val onCardFocused: ((Int) -> Unit)? = null
+    private val onCardFocused: ((Int) -> Unit)? = null,
+    private val onMenu: ((MediaItem, Int) -> Unit)? = null
 ) : RecyclerView.Adapter<PosterAdapter.Holder>() {
 
     inner class Holder(view: View) : RecyclerView.ViewHolder(view) {
@@ -88,6 +89,10 @@ class PosterAdapter(
                 //    后面十几张永远够不着。所以这里「滚一张卡 + 交焦点」自己做。
                 keyCode == KeyEvent.KEYCODE_DPAD_RIGHT -> moveTo(view, position + 1)
                 keyCode == KeyEvent.KEYCODE_DPAD_LEFT -> moveTo(view, position - 1)
+                onMenu != null && keyCode in MENU_KEYS -> {
+                    if (event.repeatCount == 0) onMenu.invoke(items[position], position)
+                    true
+                }
 
                 else -> false
             }
@@ -104,6 +109,17 @@ class PosterAdapter(
         holder.itemView.setOnClickListener {
             val position = holder.adapterPosition
             if (position != RecyclerView.NO_POSITION) onClick(items[position])
+        }
+        if (onMenu != null) {
+            holder.itemView.setOnLongClickListener {
+                val position = holder.adapterPosition
+                if (position != RecyclerView.NO_POSITION) {
+                    onMenu.invoke(items[position], position)
+                    true
+                } else {
+                    false
+                }
+            }
         }
         return holder
     }
@@ -247,7 +263,27 @@ class PosterAdapter(
      */
     fun indexOf(itemId: String): Int = items.indexOfFirst { it.id == itemId }
 
+    fun updateAt(position: Int, item: MediaItem) {
+        if (position !in items.indices) return
+        items[position] = item
+        notifyItemChanged(position)
+    }
+
+    fun removeAt(position: Int): Int {
+        if (position !in items.indices) return items.size
+        items.removeAt(position)
+        notifyItemRemoved(position)
+        return items.size
+    }
+
     companion object {
+        private val MENU_KEYS = setOf(
+            KeyEvent.KEYCODE_MENU,
+            KeyEvent.KEYCODE_INFO,
+            KeyEvent.KEYCODE_BOOKMARK,
+            KeyEvent.KEYCODE_GUIDE
+        )
+
         /**
          * 取图宽度（像素）。
          *

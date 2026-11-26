@@ -90,6 +90,10 @@ class HomeActivity : Activity() {
     private lateinit var boxLoading: View
     private lateinit var boxLibLoading: View
     private lateinit var tvHint: TextView
+    private lateinit var boxHomeAuth: View
+    private lateinit var tvHomeAuthHint: TextView
+    private lateinit var btnHomeLogin: TextView
+    private lateinit var btnHomeSettings: TextView
 
     /**
      * 每个页面自己的提示语（空态 / 出错 / 搜索引导），索引跟 tab 一致。
@@ -314,6 +318,7 @@ class HomeActivity : Activity() {
     private var autoFocusHome = false
     private var redirectingToLogin = false
     private var loginDialog: Dialog? = null
+    private var authRequiredHint: String? = null
 
     /** 媒体库清单（首页和媒体库页共用一份，避免取两遍）。 */
     private var libraries: List<MediaItem> = emptyList()
@@ -336,6 +341,25 @@ class HomeActivity : Activity() {
         boxLoading = findViewById(R.id.box_home_loading)
         boxLibLoading = findViewById(R.id.box_lib_loading)
         tvHint = findViewById(R.id.tv_home_hint)
+        boxHomeAuth = findViewById(R.id.box_home_auth)
+        tvHomeAuthHint = findViewById(R.id.tv_home_auth_hint)
+        btnHomeLogin = findViewById(R.id.btn_home_login)
+        btnHomeSettings = findViewById(R.id.btn_home_settings)
+
+        btnHomeLogin.setOnClickListener { showLoginDialog(authRequiredHint) }
+        btnHomeLogin.setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                navItems.getOrNull(tabIndex)?.requestFocus()
+                true
+            } else false
+        }
+        btnHomeSettings.setOnClickListener { showSettingsMenu() }
+        btnHomeSettings.setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                btnSettings.requestFocus()
+                true
+            } else false
+        }
 
         session = Session.get(this)
         api = EmbyApi(this, session.server, session.token, session.userId)
@@ -352,12 +376,15 @@ class HomeActivity : Activity() {
         showPage(0)
 
         if (!session.isLoggedIn) {
-            // 未登录直接把登录悬浮窗盖在主页上，背后能透出顶栏骨架
+            // 未登录直接把登录悬浮窗盖在主页上，背后能透出顶栏骨架；关掉弹窗后可留在主页或去设置升级
+            authRequiredHint = intent.getStringExtra(EXTRA_LOGIN_HINT)
+                ?.takeIf { it.isNotEmpty() }
+                ?: getString(R.string.home_login_required)
+            showPage(0)
             suppressTabSwitch = true
-            val hint = intent.getStringExtra(EXTRA_LOGIN_HINT)
             navBar.post {
                 if (!isFinishing && !isDestroyed && !session.isLoggedIn) {
-                    showLoginDialog(hint)
+                    showLoginDialog(authRequiredHint)
                 }
             }
             return
@@ -510,7 +537,7 @@ class HomeActivity : Activity() {
      *        第一页，后回来的那次 `submit()` 会把已经拿到焦点的那张卡 detach 掉，
      *        焦点被框架甩到「排序」那颗 chip 上（实测）。
      */
-    private fun switchTab(index: Int, libraryTarget: Int = -1) {
+    private fun switchTab(index: Int, libraryTarget: Int = -1, load: Boolean = true) {
         if (index !in 0..2) return
         if (index != 0) autoFocusHome = false
         tabIndex = index
@@ -518,6 +545,7 @@ class HomeActivity : Activity() {
         refreshNavUnderlines()
         // 先按目标页切显隐，取完数再交给 revealPage 收尾
         showPage(index)
+        if (!load || !session.isLoggedIn) return
         when (index) {
             0 -> if (!pageReady[0] && !homeLoading) loadHome(focusFirst = false)
             1 -> if (libraryTarget >= 0) {
@@ -539,6 +567,10 @@ class HomeActivity : Activity() {
 
     /** 焦点从顶栏进到内容区（用户主动按的，所以要 force）。 */
     private fun focusContentOf(index: Int) {
+        if (!session.isLoggedIn) {
+            btnHomeLogin.requestFocus()
+            return
+        }
         when (index) {
             0 -> focusHomeFirstCard(force = true)
             1 -> {
@@ -550,6 +582,20 @@ class HomeActivity : Activity() {
     }
 
     private fun showPage(index: Int) {
+        if (!session.isLoggedIn) {
+            pageHome.visibility = View.GONE
+            pageLibrary.visibility = View.GONE
+            pageSearch.visibility = View.GONE
+            pbLoading.visibility = View.GONE
+            boxLoading.visibility = View.GONE
+            boxLibLoading.visibility = View.GONE
+            tvHint.visibility = View.GONE
+            tvHomeAuthHint.text = authRequiredHint?.takeIf { it.isNotEmpty() }
+                ?: getString(R.string.home_login_required)
+            boxHomeAuth.visibility = View.VISIBLE
+            return
+        }
+        boxHomeAuth.visibility = View.GONE
         pageHome.visibility = if (index == 0) View.VISIBLE else View.GONE
         pageLibrary.visibility = if (index == 1) View.VISIBLE else View.GONE
         pageSearch.visibility = if (index == 2) View.VISIBLE else View.GONE
@@ -577,7 +623,7 @@ class HomeActivity : Activity() {
 
     /** 两条首页请求并行，回调都在主线程更新页面。 */
     private fun loadHome(focusFirst: Boolean) {
-        if (homeLoading) return
+        if (!session.isLoggedIn || homeLoading) return
         homeLoading = true
         homePendingReset = true
         autoFocusHome = focusFirst
@@ -828,7 +874,10 @@ class HomeActivity : Activity() {
                 if (homeRows.firstOrNull() === rv) {
                     pageHome.post { if (pageHome.scrollY != 0) pageHome.scrollTo(0, 0) }
                 }
-            }
+            },
+            onMenu = if (sec.libraryId.isEmpty()) {
+                { item, pos -> showResumeItemMenu(rv, item, pos) }
+            } else null
         )
         return rv
     }
@@ -964,6 +1013,112 @@ class HomeActivity : Activity() {
         }
     }
 
+    /** 「继续观看」卡片按菜单键 / 长按确定键弹出的快捷操作菜单。 */
+    private fun showResumeItemMenu(row: RecyclerView, item: MediaItem, position: Int) {
+        suppressTabSwitch = true
+        val title = if (item.seriesName.isNotEmpty()) {
+            "${item.seriesName} · ${item.displayTitle()}"
+        } else {
+            item.displayTitle()
+        }
+        val focusedCard = (row.layoutManager as? LinearLayoutManager)?.findViewByPosition(position)
+        val items = listOf(
+            if (!item.isFavorite) {
+                TvMenu.Item("添加到收藏夹", "加入 Emby 收藏") {
+                    updateResumeFavorite(row, item, position, true)
+                }
+            } else {
+                TvMenu.Item("取消收藏", "从 Emby 收藏夹移除") {
+                    updateResumeFavorite(row, item, position, false)
+                }
+            },
+            TvMenu.Item("标记为已观看", "同步到 Emby 并移出继续观看") {
+                updateResumePlayed(row, item, position, true)
+            },
+            TvMenu.Item("标记为未观看", "清除已看状态和观看进度") {
+                updateResumePlayed(row, item, position, false)
+            },
+            TvMenu.Item("移除观看记录", "从「继续观看」中移除") {
+                removeResumeItem(row, item, position)
+            }
+        )
+        TvMenu.show(this, title, items, onDismiss = { restoreFocusAfterDialog(focusedCard) })
+    }
+
+    private fun updateResumeFavorite(row: RecyclerView, item: MediaItem, position: Int, favorite: Boolean) {
+        worker.execute {
+            val res = api.setFavorite(item.id, favorite)
+            main.post {
+                if (isFinishing || isDestroyed) return@post
+                res.onSuccess {
+                    val adapter = row.adapter as? PosterAdapter
+                    val idx = adapter?.indexOf(item.id)?.takeIf { it >= 0 } ?: position
+                    adapter?.updateAt(idx, item.copy(isFavorite = favorite))
+                    toast(if (favorite) "已添加到收藏夹" else "已取消收藏")
+                }.onFailure { err ->
+                    if (handleAuthExpiredIfNeeded(err)) return@onFailure
+                    toast(friendlyError(err))
+                }
+            }
+        }
+    }
+
+    private fun updateResumePlayed(row: RecyclerView, item: MediaItem, position: Int, played: Boolean) {
+        worker.execute {
+            val res = api.setPlayed(item.id, played)
+            main.post {
+                if (isFinishing || isDestroyed) return@post
+                res.onSuccess {
+                    removeCardFromResumeRow(row, item.id, position)
+                    toast(if (played) "已标记为已观看" else "已标记为未观看")
+                }.onFailure { err ->
+                    if (handleAuthExpiredIfNeeded(err)) return@onFailure
+                    toast(friendlyError(err))
+                }
+            }
+        }
+    }
+
+    private fun removeResumeItem(row: RecyclerView, item: MediaItem, position: Int) {
+        worker.execute {
+            val res = api.removeFromResume(item.id)
+            main.post {
+                if (isFinishing || isDestroyed) return@post
+                res.onSuccess {
+                    removeCardFromResumeRow(row, item.id, position)
+                    toast("已移除观看记录")
+                }.onFailure { err ->
+                    if (handleAuthExpiredIfNeeded(err)) return@onFailure
+                    toast(friendlyError(err))
+                }
+            }
+        }
+    }
+
+    private fun removeCardFromResumeRow(row: RecyclerView, itemId: String, fallbackPos: Int) {
+        val adapter = row.adapter as? PosterAdapter ?: return
+        val idx = adapter.indexOf(itemId).let { if (it >= 0) it else fallbackPos }
+        val remaining = adapter.removeAt(idx)
+        if (remaining > 0) {
+            focusCardIn(row, idx.coerceAtMost(remaining - 1))
+            return
+        }
+        val rowIndex = homeRows.indexOf(row)
+        if (rowIndex >= 0) {
+            sectionContainer.removeViewAt(rowIndex * 2)
+            sectionContainer.removeViewAt(rowIndex * 2)
+            homeRows.removeAt(rowIndex)
+            homeMoreChips.removeAt(rowIndex)
+            homeRowOrder.removeAt(rowIndex)
+            if (homeRows.isNotEmpty()) {
+                sectionContainer.getChildAt(0)?.setPadding(dp(24), 0, dp(24), 0)
+                focusHomeFirstCard(force = true)
+            } else {
+                navItems.firstOrNull()?.requestFocus()
+            }
+        }
+    }
+
     // ==================== 媒体库页 ====================
 
     private fun buildLibraryPage() {
@@ -1026,6 +1181,7 @@ class HomeActivity : Activity() {
 
     /** 第一次进媒体库页才建 chip。 */
     private fun loadLibraryPageIfNeeded() {
+        if (!session.isLoggedIn) return
         if (pageReady[1]) {
             showPage(1)
             return
@@ -1167,6 +1323,7 @@ class HomeActivity : Activity() {
      * （11 个库在 720dp 高的屏上刚好装不下，不滚就有一半够不到）。
      */
     private fun selectLibrary(index: Int, focusGrid: Boolean) {
+        if (!session.isLoggedIn) return
         val lib = libraries.getOrNull(index) ?: return
         libIndex = index
         markLibTabSelected(index)
@@ -1229,7 +1386,7 @@ class HomeActivity : Activity() {
     }
 
     private fun loadMoreLibrary() {
-        if (libLoading || libAtEnd) return
+        if (!session.isLoggedIn || libLoading || libAtEnd) return
         val lib = libraries.getOrNull(libIndex) ?: return
         libLoading = true
         val from = libOffset
@@ -1250,7 +1407,10 @@ class HomeActivity : Activity() {
                     libOffset = from + list.size
                     libAtEnd = list.size < PAGE_LIMIT
                     libAdapter?.append(list)
-                }.onFailure { libAtEnd = true }
+                }.onFailure {
+                    if (handleAuthExpiredIfNeeded(it)) return@onFailure
+                    libAtEnd = true
+                }
             }
         }
     }
@@ -1362,12 +1522,13 @@ class HomeActivity : Activity() {
             if (PopupGate.anyOpen()) return@postDelayed
             suppressTabSwitch = false
             if (target != null && target.isShown) target.requestFocus()
-            else if (tabIndex == 2) searchBox.requestFocus()
+            else if (tabIndex == 2 && session.isLoggedIn) searchBox.requestFocus()
             else focusContentOf(tabIndex)
         }, 80)
     }
 
     private fun runSearch(query: String) {
+        if (!session.isLoggedIn) return
         searchQuery = query
         searchBox.text = query
         showLoading(true, page = 2)
@@ -1606,23 +1767,18 @@ class HomeActivity : Activity() {
     }
 
     private fun play(item: MediaItem, startMs: Long = item.resumeMs) {
-        if (item.mediaSourceId.isNotEmpty()) {
-            startPlayer(item, item.mediaSourceId, startMs, item.seriesId)
-            return
-        }
         val page = tabIndex
         showLoading(true, page)
         worker.execute {
-            val r = api.itemDetail(item.id)
+            val r = api.resolvePlayback(item, item.mediaSourceId)
             main.post {
                 showLoading(false, page)
-                val detail = r.getOrNull()
-                val msId = detail?.mediaSourceId.orEmpty()
-                if (msId.isEmpty()) {
+                val plan = r.getOrNull()
+                if (plan == null) {
                     if (handleAuthExpiredIfNeeded(r.exceptionOrNull())) return@post
                     toast(friendlyError(r.exceptionOrNull() ?: IllegalStateException("没有可播放的媒体源")))
                 } else {
-                    startPlayer(item, msId, startMs, detail?.seriesId.orEmpty().ifEmpty { item.seriesId })
+                    startPlayer(item, plan, startMs, item.seriesId)
                 }
             }
         }
@@ -1630,16 +1786,19 @@ class HomeActivity : Activity() {
 
     private fun startPlayer(
         item: MediaItem,
-        mediaSourceId: String,
+        plan: work.luxiaoxiao.myembyhub.net.PlaybackPlan,
         startMs: Long,
         seriesId: String = item.seriesId
     ) {
         val i = Intent(this, PlayerActivity::class.java)
-        i.putExtra(PlayerActivity.EXTRA_URL, api.streamUrl(item, mediaSourceId))
+        i.putExtra(PlayerActivity.EXTRA_URL, plan.url)
         i.putExtra(PlayerActivity.EXTRA_TITLE, item.displayTitle())
         i.putExtra(PlayerActivity.EXTRA_ITEM_ID, item.id)
         if (seriesId.isNotEmpty()) i.putExtra(PlayerActivity.EXTRA_SERIES_ID, seriesId)
-        i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, mediaSourceId)
+        i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, plan.mediaSourceId)
+        if (plan.playSessionId.isNotEmpty()) {
+            i.putExtra(PlayerActivity.EXTRA_PLAY_SESSION_ID, plan.playSessionId)
+        }
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
         startActivityForResult(i, REQ_PLAY)
     }
@@ -1667,24 +1826,37 @@ class HomeActivity : Activity() {
     private fun showSettingsMenu() {
         // 菜单期间同样要挡住「焦点即切换」：菜单一关，系统会把焦点塞给第一个 tab
         suppressTabSwitch = true
+        val items = ArrayList<TvMenu.Item>().apply {
+            add(TvMenu.Item("服务器信息") { showServerInfo() })
+            add(TvMenu.Item("TLS 实现", tlsImplLabel()) { showTlsMenu() })
+            add(
+                TvMenu.Item("检查更新", "从 GitHub Release 取新版本") {
+                    UpdateUi.check(this@HomeActivity, worker, main, ::toast)
+                }
+            )
+            add(TvMenu.Item("反馈", "把设备信息发给开发者") { showFeedback() })
+            add(TvMenu.Item("体验优化计划", playStatsLabel()) { showStatsMenu() })
+            add(TvMenu.Item("播完自动下一集", autoNextLabel()) { toggleAutoNext() })
+            if (session.isLoggedIn) {
+                add(
+                    TvMenu.Item("刷新首页", "重新取一遍数据") {
+                        pageReady.fill(false)
+                        if (tabIndex == 0) loadHome(focusFirst = false) else switchTab(0)
+                    }
+                )
+                add(TvMenu.Item("退出登录", "清掉本地登录态") { confirmLogout() })
+            } else {
+                add(
+                    TvMenu.Item("登录账号", "打开登录窗口") {
+                        showLoginDialog(authRequiredHint)
+                    }
+                )
+            }
+        }
         TvMenu.show(
             this,
             getString(R.string.home_settings),
-            listOf(
-                TvMenu.Item("服务器信息") { showServerInfo() },
-                TvMenu.Item("TLS 实现", tlsImplLabel()) { showTlsMenu() },
-                TvMenu.Item("检查更新", "从 GitHub Release 取新版本") {
-                    UpdateUi.check(this, worker, main, ::toast)
-                },
-                TvMenu.Item("反馈", "把设备信息发给开发者") { showFeedback() },
-                TvMenu.Item("体验优化计划", playStatsLabel()) { showStatsMenu() },
-                TvMenu.Item("播完自动下一集", autoNextLabel()) { toggleAutoNext() },
-                TvMenu.Item("刷新首页", "重新取一遍数据") {
-                    pageReady.fill(false)
-                    if (tabIndex == 0) loadHome(focusFirst = false) else switchTab(0)
-                },
-                TvMenu.Item("退出登录", "清掉本地登录态") { confirmLogout() }
-            ),
+            items,
             onDismiss = { restoreFocusAfterDialog() }
         )
     }
@@ -1982,7 +2154,11 @@ class HomeActivity : Activity() {
         EmbyHttpDataSource.clearIdlePool()
         ImageLoader.get(this).clearMemCache()
         session.clear()
-        showLoginDialog("登录已过期，请重新登录")
+        api.token = ""
+        resetAllPagesForLogin()
+        authRequiredHint = "登录已过期，请重新登录"
+        switchTab(0, load = false)
+        showLoginDialog(authRequiredHint)
         return true
     }
 
@@ -1997,15 +2173,19 @@ class HomeActivity : Activity() {
             onLoggedIn = {
                 loginDialog = null
                 redirectingToLogin = false
+                authRequiredHint = null
                 api = EmbyApi(this, session.server, session.token, session.userId)
                 resetAllPagesForLogin()
                 suppressTabSwitch = false
-                switchTab(0)
+                switchTab(0, load = false)
+                navItems.firstOrNull()?.requestFocus()
                 loadHome(focusFirst = true)
             },
-            onCancelExit = {
+            onClose = {
                 loginDialog = null
-                finish()
+                redirectingToLogin = false
+                showPage(tabIndex)
+                restoreFocusAfterDialog(btnHomeLogin)
             }
         )
     }
@@ -2037,9 +2217,11 @@ class HomeActivity : Activity() {
             EmbyHttpDataSource.clearIdlePool()
             ImageLoader.get(this).clearMemCache()
             session.clear()
+            api.token = ""
             resetAllPagesForLogin()
-            switchTab(0)
-            showLoginDialog("已退出登录，请重新登录")
+            authRequiredHint = "已退出登录，请重新登录"
+            switchTab(0, load = false)
+            showLoginDialog(authRequiredHint)
         }
     }
 
@@ -2051,6 +2233,14 @@ class HomeActivity : Activity() {
     }
 
     private fun updateLoadingUi() {
+        if (!session.isLoggedIn) {
+            pbLoading.visibility = View.GONE
+            boxLoading.visibility = View.GONE
+            boxLibLoading.visibility = View.GONE
+            tvHint.visibility = View.GONE
+            boxHomeAuth.visibility = View.VISIBLE
+            return
+        }
         val loading = isPageLoading(tabIndex)
         pbLoading.visibility = if (loading) View.VISIBLE else View.GONE
         // 首页只在没有任何区块时显示居中的转圈，已有内容时保留顶栏进度条。
@@ -2138,7 +2328,7 @@ class HomeActivity : Activity() {
             if (!suppressTabSwitch) return@postDelayed
             suppressTabSwitch = false
             // 这期间焦点多半被系统塞给了第一个 tab，扶回当前页内容区
-            if (tabIndex == 2) searchBox.requestFocus() else focusContentOf(tabIndex)
+            if (tabIndex == 2 && session.isLoggedIn) searchBox.requestFocus() else focusContentOf(tabIndex)
         }, 120)
     }
 

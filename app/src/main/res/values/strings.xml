@@ -19,6 +19,7 @@
     <string name="hint_user">用户名</string>
     <string name="hint_password">密码</string>
     <string name="btn_login">登录</string>
+    <string name="login_close">关闭</string>
     <string name="login_failed">登录失败</string>
 
     <string name="library_title">媒体库</string>

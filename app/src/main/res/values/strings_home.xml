@@ -15,6 +15,9 @@
     <string name="home_resume">继续观看</string>
     <string name="home_empty">服务器上还没有内容</string>
     <string name="home_failed">加载失败：%1$s</string>
+    <string name="home_login_required">当前未登录</string>
+    <string name="home_login_required_sub">可点击下方按钮打开登录页，也可前往「设置」检查更新</string>
+    <string name="home_open_login">打开登录</string>
 
     <!-- 顶栏最右侧的独立按钮，不参与 tab 切换 -->
     <string name="home_settings">设置</string>

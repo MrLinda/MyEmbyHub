@@ -154,11 +154,22 @@ class DetailActivity : Activity() {
         // 剧集才拉选集；电影/单集不用发这个请求。
         if (d.type == "Series") {
             val er = api.episodes(d.id)
-            val list = er.getOrNull()
+            val list = er.getOrNull().orEmpty()
             // 「该看的那一集」单独问一次 —— Emby 的 NextUp 已经把
-            // 「没看完的优先 → 下一集 → 第一集」这套逻辑算好了；拿不到直接用列表第一集，省掉一次请求。
-            val next = api.nextUp(d.id).getOrNull() ?: list?.firstOrNull()
-            main.post { bindEpisodes(list.orEmpty(), next) }
+            // 「没看完的优先 → 下一集 → 第一集」这套逻辑算好了；拿不到则找在播集或首集。
+            val nextRes = if (work.luxiaoxiao.myembyhub.net.isAuthExpired(er.exceptionOrNull())) null else api.nextUp(d.id)
+            val rawNext = nextRes?.getOrNull()
+            val validNext = rawNext?.takeIf { n ->
+                list.any { it.id == n.id } || (n.seriesId.isNotEmpty() && n.seriesId == d.id)
+            }
+            val next = validNext
+                ?: list.lastOrNull { it.positionTicks > 0 && !it.played }
+                ?: list.firstOrNull { !it.played }
+                ?: list.firstOrNull()
+            main.post {
+                if (handleAuthExpiredIfNeeded(er.exceptionOrNull() ?: nextRes?.exceptionOrNull())) return@post
+                bindEpisodes(list, next)
+            }
         }
     }
 
@@ -374,35 +385,37 @@ class DetailActivity : Activity() {
 
     private fun startPlayback() {
         val target = playTarget ?: return
-        if (target.mediaSourceId.isNotEmpty()) {
-            startPlayer(target, target.mediaSourceId, playStartMs)
-            return
-        }
-        // 列表接口偶尔缺 MediaSources，取流前补一次详情。
         tvLoading.visibility = View.VISIBLE
         worker.execute {
-            val r = api.itemDetail(target.id)
+            val r = api.resolvePlayback(target, target.mediaSourceId)
             main.post {
                 tvLoading.visibility = View.GONE
-                val msId = r.getOrNull()?.mediaSourceId.orEmpty()
-                if (msId.isEmpty()) {
+                val plan = r.getOrNull()
+                if (plan == null) {
                     if (handleAuthExpiredIfNeeded(r.exceptionOrNull())) return@post
                     toast(friendlyError(r.exceptionOrNull() ?: IllegalStateException("没有可播放的媒体源")))
                 } else {
-                    startPlayer(target, msId, playStartMs)
+                    startPlayer(target, plan, playStartMs)
                 }
             }
         }
     }
 
-    private fun startPlayer(item: MediaItem, mediaSourceId: String, startMs: Long) {
+    private fun startPlayer(
+        item: MediaItem,
+        plan: work.luxiaoxiao.myembyhub.net.PlaybackPlan,
+        startMs: Long
+    ) {
         val i = Intent(this, PlayerActivity::class.java)
-        i.putExtra(PlayerActivity.EXTRA_URL, api.streamUrl(item, mediaSourceId))
+        i.putExtra(PlayerActivity.EXTRA_URL, plan.url)
         i.putExtra(PlayerActivity.EXTRA_TITLE, item.displayTitle())
         i.putExtra(PlayerActivity.EXTRA_ITEM_ID, item.id)
         val sid = if (item.seriesId.isNotEmpty()) item.seriesId else seriesId
         if (sid.isNotEmpty()) i.putExtra(PlayerActivity.EXTRA_SERIES_ID, sid)
-        i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, mediaSourceId)
+        i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, plan.mediaSourceId)
+        if (plan.playSessionId.isNotEmpty()) {
+            i.putExtra(PlayerActivity.EXTRA_PLAY_SESSION_ID, plan.playSessionId)
+        }
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
         // 详情页手里已经有整季的剧集列表，直接传给播放器 ——
         // 不传的话播放器还要「详情 → seriesId → 剧集列表」多跑两次请求，

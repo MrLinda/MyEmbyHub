@@ -491,8 +491,7 @@ class EmbyHttpDataSource(
     ): HttpResponse {
         val u = UrlKit.parse(urlStr)
         val initialEmbyRequest = !attemptedInitialEmbyRequest && hop == "origin" && position == 0L &&
-            length == C.LENGTH_UNSET.toLong() && u.path.contains("/Videos/", ignoreCase = true) &&
-            u.path.endsWith("/stream", ignoreCase = true)
+            length == C.LENGTH_UNSET.toLong()
         if (initialEmbyRequest) attemptedInitialEmbyRequest = true
         // 复用的连接可能已经被对端关掉了（服务端 keepalive 超时、NAT 老化）。
         // 这种情况下第一次写/读会抛异常，换条新连接重试一次即可 —— 不值得让用户看到报错。

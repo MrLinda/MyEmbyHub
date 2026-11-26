@@ -88,29 +88,43 @@ class EmbyApi(
             put("Pw", password)
         }.toString()
 
+        val url = "$base/Users/AuthenticateByName"
         return try {
-            val conn = open("$base/Users/AuthenticateByName", "POST") as HttpsURLConnection
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            withTls(url) { factory ->
+                val conn = open(url, "POST", factory)
+                try {
+                    conn.doOutput = true
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
-            val code = conn.responseCode
-            if (code == 200) {
-                val text = conn.inputStream.use { readAll(it) }
-                val obj = org.json.JSONObject(text)
-                val t = obj.optString("AccessToken")
-                if (t.isEmpty()) {
-                    Result.failure(IllegalStateException("登录成功但没拿到 AccessToken"))
-                } else {
-                    server = base
-                    token = t
-                    // 顺带取出真实用户 id：后面的 Resume / NextUp 都要用它
-                    userId = obj.optJSONObject("User")?.optString("Id").orEmpty()
-                    Result.success(t)
+                    val code = conn.responseCode
+                    logTls(conn)
+                    if (code == 200) {
+                        val text = conn.inputStream.use { readAll(it) }
+                        val obj = org.json.JSONObject(text)
+                        val t = obj.optString("AccessToken")
+                        if (t.isEmpty()) {
+                            Result.failure(IllegalStateException("登录成功但没拿到 AccessToken"))
+                        } else {
+                            server = base
+                            token = t
+                            // 顺带取出真实用户 id：后面的 Resume / NextUp 都要用它
+                            userId = obj.optJSONObject("User")?.optString("Id").orEmpty()
+                            Result.success(t)
+                        }
+                    } else {
+                        val err = readError(conn)
+                        try { conn.disconnect() } catch (_: Throwable) {}
+                        Result.failure(IllegalStateException("登录失败 HTTP $code$err"))
+                    }
+                } catch (e: IOException) {
+                    try { conn.disconnect() } catch (_: Throwable) {}
+                    if (e.message?.contains("No authentication challenges") == true) {
+                        Result.failure(IllegalStateException("登录失败 HTTP 401", e))
+                    } else {
+                        Result.failure(e)
+                    }
                 }
-            } else {
-                val err = readError(conn)
-                Result.failure(IllegalStateException("登录失败 HTTP $code$err"))
             }
         } catch (e: Throwable) {
             Result.failure(e)
@@ -252,6 +266,7 @@ class EmbyApi(
             parentIndexNumber = o.optInt("ParentIndexNumber", 0),
             runtimeTicks = o.optLong("RunTimeTicks", 0),
             played = ud?.optBoolean("Played", false) ?: false,
+            isFavorite = ud?.optBoolean("IsFavorite", false) ?: false,
             positionTicks = ud?.optLong("PlaybackPositionTicks", 0) ?: 0,
             productionYear = o.optInt("ProductionYear", 0),
             officialRating = o.optString("OfficialRating"),
@@ -310,7 +325,7 @@ class EmbyApi(
             // StartIndex 用于海报墙翻页（Emby 默认从 0 开始）
             val start = if (startIndex > 0) "&StartIndex=$startIndex" else ""
             val resp = get(
-                "/Items?ParentId=$parentId&Recursive=$recursive$filter$types&Limit=$limit" +
+                "/Users/${uid()}/Items?ParentId=$parentId&Recursive=$recursive$filter$types&Limit=$limit" +
                     "&Fields=$LIST_FIELDS&SortBy=$sortBy&SortOrder=$order$start"
             )
             Result.success(parseItems(resp.body))
@@ -329,7 +344,7 @@ class EmbyApi(
             val t = term.trim()
             if (t.isEmpty()) return Result.success(emptyList())
             val resp = get(
-                "/Items?SearchTerm=${java.net.URLEncoder.encode(t, "UTF-8")}" +
+                "/Users/${uid()}/Items?SearchTerm=${java.net.URLEncoder.encode(t, "UTF-8")}" +
                     "&Recursive=true&IncludeMedia=Video&Limit=$limit&Fields=$LIST_FIELDS&SortBy=SortName"
             )
             Result.success(parseItems(resp.body, skipFolders = true))
@@ -416,8 +431,72 @@ class EmbyApi(
      * @param mediaSourceId 覆盖条目自带的 mediaSourceId（补取到的值走这里传）。
      */
     fun streamUrl(item: MediaItem, mediaSourceId: String = item.mediaSourceId): String {
-        val ms = if (mediaSourceId.isNotEmpty()) "&mediaSourceId=$mediaSourceId" else ""
-        return "$server/Videos/${item.id}/stream?static=true$ms"
+        return buildFallbackStreamUrl(normalize(server), item.id, mediaSourceId)
+    }
+
+    /**
+     * 标准 Emby/Jellyfin 播放信息协商：`POST /Items/{id}/PlaybackInfo`。
+     *
+     * 部分服务端（如 smartstrm / 302 反代）依赖客户端先发 PlaybackInfo 才会返回真实的
+     * `DirectStreamUrl`（例如 `/smartstrm?item_id=...`）；直接硬拼 `/Videos/{id}/stream`
+     * 可能绕开分流逻辑甚至被重定向到错误文件。
+     */
+    fun playbackInfo(itemId: String, mediaSourceId: String = ""): Result<PlaybackPlan> {
+        val base = normalize(server)
+        if (base.isEmpty()) return Result.failure(IllegalArgumentException("服务器地址为空"))
+        return try {
+            val profile = org.json.JSONObject().apply {
+                put("MaxStreamingBitrate", 120_000_000)
+                put(
+                    "DirectPlayProfiles",
+                    org.json.JSONArray().apply {
+                        put(org.json.JSONObject().put("Type", "Video"))
+                        put(org.json.JSONObject().put("Type", "Audio"))
+                    }
+                )
+            }
+            val payload = org.json.JSONObject().apply {
+                put("UserId", uid())
+                put("IsPlayback", true)
+                put("AutoOpenLiveStream", false)
+                if (mediaSourceId.isNotEmpty()) put("MediaSourceId", mediaSourceId)
+                put("DeviceProfile", profile)
+            }.toString()
+            val resp = post("/Items/$itemId/PlaybackInfo?UserId=${uid()}", payload)
+            val plan = parsePlaybackPlan(base, itemId, mediaSourceId, resp.body)
+                ?: return Result.failure(IllegalStateException("PlaybackInfo 未返回可用的媒体源"))
+            Result.success(plan)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 解析最终播放地址：优先走标准 `PlaybackInfo`，若服务端不支持或没给媒体源再回退到旧直连地址。
+     */
+    fun resolvePlayback(item: MediaItem, mediaSourceId: String = item.mediaSourceId): Result<PlaybackPlan> {
+        val infoRes = playbackInfo(item.id, mediaSourceId)
+        infoRes.getOrNull()?.let { return Result.success(it) }
+        val infoErr = infoRes.exceptionOrNull()
+        if (isAuthExpired(infoErr)) return Result.failure(infoErr!!)
+
+        var msId = mediaSourceId
+        if (msId.isEmpty()) {
+            val detailRes = itemDetail(item.id)
+            val detailErr = detailRes.exceptionOrNull()
+            if (isAuthExpired(detailErr)) return Result.failure(detailErr!!)
+            msId = detailRes.getOrNull()?.mediaSourceId.orEmpty()
+        }
+        if (msId.isEmpty()) {
+            return Result.failure(infoErr ?: IllegalStateException("没有可播放的媒体源"))
+        }
+        return Result.success(
+            PlaybackPlan(
+                url = streamUrl(item, msId),
+                mediaSourceId = msId,
+                playSessionId = ""
+            )
+        )
     }
 
     // ==================== 播放上报 ====================
@@ -438,6 +517,50 @@ class EmbyApi(
 
     fun reportStopped(item: MediaItem, positionTicks: Long, playSessionId: String) {
         reportPlayback("/Sessions/Playing/Stopped", item, positionTicks, playSessionId, paused = true)
+    }
+
+    // ==================== 用户状态（收藏 / 已看 / 移除继续观看） ====================
+
+    fun setFavorite(itemId: String, favorite: Boolean): Result<Unit> {
+        return try {
+            requestEmpty(if (favorite) "POST" else "DELETE", "/Users/${uid()}/FavoriteItems/$itemId")
+            Result.success(Unit)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    fun setPlayed(itemId: String, played: Boolean): Result<Unit> {
+        return try {
+            requestEmpty(if (played) "POST" else "DELETE", "/Users/${uid()}/PlayedItems/$itemId")
+            Result.success(Unit)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 从「继续观看」移除：优先用 Emby 4.8+ 的 `HideFromResume`，不支持时回退到清零进度/清除已看。
+     */
+    fun removeFromResume(itemId: String): Result<Unit> {
+        return try {
+            requestEmpty("POST", "/Users/${uid()}/Items/$itemId/HideFromResume?Hide=true")
+            Result.success(Unit)
+        } catch (e: Throwable) {
+            if (isAuthExpired(e)) return Result.failure(e)
+            try {
+                post("/Users/${uid()}/Items/$itemId/UserData", "{\"PlaybackPositionTicks\":0}")
+                Result.success(Unit)
+            } catch (e2: Throwable) {
+                if (isAuthExpired(e2)) return Result.failure(e2)
+                try {
+                    requestEmpty("DELETE", "/Users/${uid()}/PlayedItems/$itemId")
+                    Result.success(Unit)
+                } catch (e3: Throwable) {
+                    Result.failure(e3)
+                }
+            }
+        }
     }
 
     private fun reportPlayback(
@@ -565,6 +688,67 @@ class EmbyApi(
                 // ⚠️ Android 的坑：401 且无 WWW-Authenticate 头 → getResponseCode() 直接抛
                 //    "No authentication challenges found"，响应体读不到。
                 //    这里还原成明确的 401，避免把「密码错」误报成「网络失败」。
+                if (e.message?.contains("No authentication challenges") == true) {
+                    throw IllegalStateException("HTTP 401（token 无效或已过期）", e)
+                }
+                throw e
+            }
+        }
+    }
+
+    private fun post(path: String, body: String): Response {
+        val url = normalize(server) + path
+        return withTls(url) { factory ->
+            val conn = open(url, "POST", factory)
+            try {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                logTls(conn)
+                if (code in 200..299) {
+                    Response(code, conn.inputStream.use { readAll(it) })
+                } else {
+                    val err = readError(conn)
+                    try { conn.disconnect() } catch (_: Throwable) {}
+                    throw IllegalStateException("HTTP $code$err")
+                }
+            } catch (e: IOException) {
+                try { conn.disconnect() } catch (_: Throwable) {}
+                if (e.message?.contains("No authentication challenges") == true) {
+                    throw IllegalStateException("HTTP 401（token 无效或已过期）", e)
+                }
+                throw e
+            }
+        }
+    }
+
+    private fun requestEmpty(method: String, path: String): Response {
+        val url = normalize(server) + path
+        return withTls(url) { factory ->
+            val conn = open(url, method, factory)
+            try {
+                if (method.equals("POST", ignoreCase = true)) {
+                    conn.doOutput = true
+                    conn.setFixedLengthStreamingMode(0)
+                    conn.outputStream.use {}
+                }
+                val code = conn.responseCode
+                logTls(conn)
+                if (code in 200..299) {
+                    val text = try {
+                        conn.inputStream.use { readAll(it) }
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    Response(code, text)
+                } else {
+                    val err = readError(conn)
+                    try { conn.disconnect() } catch (_: Throwable) {}
+                    throw IllegalStateException("HTTP $code$err")
+                }
+            } catch (e: IOException) {
+                try { conn.disconnect() } catch (_: Throwable) {}
                 if (e.message?.contains("No authentication challenges") == true) {
                     throw IllegalStateException("HTTP 401（token 无效或已过期）", e)
                 }
@@ -785,6 +969,8 @@ data class MediaItem(
     val runtimeTicks: Long = 0,
     /** 用户是否已看完。 */
     val played: Boolean = false,
+    /** 是否已加入收藏夹。 */
+    val isFavorite: Boolean = false,
     /** 上次播放到的位置（100ns ticks）。 */
     val positionTicks: Long = 0,
     /** 出品年份，0 表示服务器没给。 */
@@ -852,4 +1038,68 @@ data class MediaItem(
             else String.format("%02d:%02d", m, s)
         }
     }
+}
+
+data class PlaybackPlan(
+    val url: String,
+    val mediaSourceId: String,
+    val playSessionId: String
+)
+
+internal fun buildFallbackStreamUrl(serverBase: String, itemId: String, mediaSourceId: String): String {
+    val base = serverBase.trimEnd('/')
+    val ms = if (mediaSourceId.isNotEmpty()) "&mediaSourceId=$mediaSourceId" else ""
+    return "$base/Videos/$itemId/stream?static=true$ms"
+}
+
+internal fun resolveServerPath(serverBase: String, rawPath: String): String {
+    val trimmed = rawPath.trim()
+    if (trimmed.startsWith("http://", ignoreCase = true) ||
+        trimmed.startsWith("https://", ignoreCase = true)
+    ) {
+        return trimmed
+    }
+    val base = serverBase.trimEnd('/')
+    val m = Regex("^(https?://[^/?#]+)(.*)$", RegexOption.IGNORE_CASE).find(base)
+        ?: return if (trimmed.startsWith("/")) "$base$trimmed" else "$base/$trimmed"
+    val origin = m.groupValues[1]
+    val basePath = m.groupValues[2].trimEnd('/')
+    if (trimmed.startsWith("/")) {
+        return if (basePath.isNotEmpty() && !trimmed.startsWith("$basePath/") && trimmed != basePath) {
+            base + trimmed
+        } else {
+            origin + trimmed
+        }
+    }
+    return "$base/$trimmed"
+}
+
+internal fun parsePlaybackPlan(
+    serverBase: String,
+    itemId: String,
+    preferredMediaSourceId: String,
+    body: String
+): PlaybackPlan? {
+    val obj = org.json.JSONObject(body)
+    val playSessionId = obj.optString("PlaySessionId")
+    val sources = obj.optJSONArray("MediaSources") ?: return null
+    if (sources.length() == 0) return null
+    var src = sources.getJSONObject(0)
+    if (preferredMediaSourceId.isNotEmpty()) {
+        for (i in 0 until sources.length()) {
+            val candidate = sources.getJSONObject(i)
+            if (candidate.optString("Id") == preferredMediaSourceId) {
+                src = candidate
+                break
+            }
+        }
+    }
+    val msId = src.optString("Id").ifEmpty { preferredMediaSourceId }
+    val direct = src.optString("DirectStreamUrl").trim()
+    val url = if (direct.isNotEmpty()) {
+        resolveServerPath(serverBase, direct)
+    } else {
+        buildFallbackStreamUrl(serverBase, itemId, msId)
+    }
+    return PlaybackPlan(url = url, mediaSourceId = msId, playSessionId = playSessionId)
 }

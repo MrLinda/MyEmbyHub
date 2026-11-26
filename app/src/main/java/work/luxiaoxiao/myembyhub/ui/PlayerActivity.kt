@@ -130,6 +130,7 @@ class PlayerActivity : Activity() {
     private var initialItemId = ""
     private var initialSeriesId = ""
     private var episodesLoadStarted = false
+    private var redirectingToLogin = false
 
     /**
      * 播放器自己的 TrackSelector，字幕开关要改它的参数（`setTrackTypeDisabled`）。
@@ -341,6 +342,9 @@ class PlayerActivity : Activity() {
         val startMs = intent.getLongExtra(EXTRA_START_MS, 0L)
         initialItemId = itemId
         initialSeriesId = intent.getStringExtra(EXTRA_SERIES_ID) ?: ""
+        playSessionId = intent.getStringExtra(EXTRA_PLAY_SESSION_ID)
+            ?.takeIf { it.isNotEmpty() }
+            ?: UUID.randomUUID().toString().replace("-", "")
 
         // 每播一个新条目先把快照清干净 —— 否则「上一部片播放失败」的报错
         // 会被当成「这一部片」的现场一起报上去，反馈就白填了。
@@ -650,6 +654,7 @@ class PlayerActivity : Activity() {
 
             override fun onPlayerError(eventTime: AnalyticsListener.EventTime, error: PlaybackException) {
                 main.post {
+                    if (handleAuthExpiredIfNeeded(error)) return@post
                     tvError.visibility = View.VISIBLE
                     val raw = error.message ?: ""
                     // ⚠️ `error.message` 只有外层那一句（"Source error" / "Renderer error."），
@@ -957,43 +962,53 @@ class PlayerActivity : Activity() {
         val title = ep.label()
         tvInfo.text = title
 
-        if (ep.mediaSourceId.isNotEmpty()) {
-            startEpisodeStream(ep, ep.mediaSourceId)
-            return
-        }
-        // 列表接口偶尔缺 MediaSources（见 HomeActivity.play 的同款兜底）
         tvSpeedHint.text = "正在获取播放地址…"
         boxSpeed.visibility = View.VISIBLE
+        val stub = MediaItem(
+            id = ep.id,
+            name = title,
+            type = "Episode",
+            isFolder = false,
+            mediaSourceId = ep.mediaSourceId
+        )
         worker.execute {
-            val msId = a.itemDetail(ep.id).getOrNull()?.mediaSourceId.orEmpty()
+            val res = a.resolvePlayback(stub, ep.mediaSourceId)
+            val plan = res.getOrNull()
             main.post {
                 if (isFinishing || isDestroyed) return@post
                 boxSpeed.visibility = View.GONE
-                if (msId.isEmpty()) toast("这一集拿不到播放源（mediaSourceId 为空）")
-                else startEpisodeStream(ep, msId)
+                if (plan == null) {
+                    val err = res.exceptionOrNull()
+                    if (handleAuthExpiredIfNeeded(err)) return@post
+                    toast(
+                        if (err != null) work.luxiaoxiao.myembyhub.net.friendlyError(err)
+                        else "这一集拿不到播放源"
+                    )
+                } else {
+                    startEpisodeStream(ep, plan)
+                }
             }
         }
     }
 
-    /** 真正把某一集的流喂给播放器（`mediaSourceId` 已确保非空）。 */
-    private fun startEpisodeStream(ep: EpisodeRef, mediaSourceId: String) {
-        val a = api ?: return
+    /** 真正把某一集的流喂给播放器（已通过 PlaybackInfo 协商好地址）。 */
+    private fun startEpisodeStream(ep: EpisodeRef, plan: work.luxiaoxiao.myembyhub.net.PlaybackPlan) {
         val title = ep.label()
         val item = MediaItem(
             id = ep.id,
             name = title,
             type = "Episode",
             isFolder = false,
-            mediaSourceId = mediaSourceId
+            mediaSourceId = plan.mediaSourceId
         )
         reportItem = item
-        // 每一集都是新的 Emby 播放会话，沿用旧的会让服务端把两集算成一次
-        playSessionId = UUID.randomUUID().toString().replace("-", "")
+        // 每一集都是新的 Emby 播放会话，优先沿用 PlaybackInfo 返回的 PlaySessionId
+        playSessionId = plan.playSessionId.ifEmpty { UUID.randomUUID().toString().replace("-", "") }
         // 现场快照与打点都按「新的一集」重来
         PlaybackSnapshot.reset(title, ep.id)
         PlayStats.begin(this, title, ep.id)
         android.util.Log.i(TAG, "起播：$title（${ep.id}）从 ${ep.resumeMs}ms")
-        prepareEpisode(a.streamUrl(item, mediaSourceId), ep.resumeMs)
+        prepareEpisode(plan.url, ep.resumeMs)
     }
 
     private fun ensureEpisodeListLoaded() {
@@ -1603,6 +1618,20 @@ class PlayerActivity : Activity() {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
     }
 
+    private fun handleAuthExpiredIfNeeded(e: Throwable?): Boolean {
+        if (!work.luxiaoxiao.myembyhub.net.isAuthExpired(e)) return false
+        if (redirectingToLogin || isFinishing || isDestroyed) return true
+        redirectingToLogin = true
+        hideSpeed(record = false)
+        EmbyHttpDataSource.clearIdlePool()
+        ImageLoader.get(this).clearMemCache()
+        Session.get(this).clear()
+        toast("登录已过期，请重新登录")
+        startActivity(HomeActivity.loginIntent(this, "登录已过期，请重新登录"))
+        finish()
+        return true
+    }
+
     override fun onPause() {
         player?.playWhenReady = false
         main.removeCallbacks(progressTick)
@@ -1693,6 +1722,7 @@ class PlayerActivity : Activity() {
         const val EXTRA_ITEM_ID = "item_id"
         const val EXTRA_SERIES_ID = "series_id"
         const val EXTRA_MEDIA_SOURCE_ID = "media_source_id"
+        const val EXTRA_PLAY_SESSION_ID = "play_session_id"
         const val EXTRA_START_MS = "start_ms"
 
         /**
