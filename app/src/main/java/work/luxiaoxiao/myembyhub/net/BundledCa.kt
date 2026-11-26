@@ -72,7 +72,19 @@ object BundledCa {
         return false
     }
 
-    /** 系统信任 + 内置锚点：系统能验就系统验，验不过再走内置锚点。 */
+    /** 链里是否有证书由内置锚点签发（O(链长×锚点数) 比对，零加解密）。 */
+    private fun matchesAnyAnchor(chain: Array<out X509Certificate>, anchors: List<X509Certificate>): Boolean {
+        for (cert in chain) {
+            val issuer = cert.issuerX500Principal
+            val subject = cert.subjectX500Principal
+            if (anchors.any { it.subjectX500Principal == issuer || it.subjectX500Principal == subject }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /** 系统信任 + 内置锚点：命中内置锚点优先走内置验签，其余走系统信任并兜底内置。 */
     fun trustManager(ctx: android.content.Context): X509TrustManager {
         val anchors = load(ctx)
         val system = try {
@@ -86,6 +98,8 @@ object BundledCa {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
                 if (chain == null || chain.isEmpty()) throw CertificateException("空证书链")
+                val anchorMatch = matchesAnyAnchor(chain, anchors)
+                if (anchorMatch && verifyChain(chain, anchors)) return
                 if (system != null) {
                     try {
                         system.checkServerTrusted(chain, authType)
@@ -93,9 +107,8 @@ object BundledCa {
                     } catch (ignored: Throwable) {
                     }
                 }
-                if (!verifyChain(chain, anchors)) {
-                    throw CertificateException("内置锚点(${anchors.size} 张)也无法验证该证书链")
-                }
+                if (!anchorMatch && verifyChain(chain, anchors)) return
+                throw CertificateException("内置锚点(${anchors.size} 张)也无法验证该证书链")
             }
             override fun getAcceptedIssuers(): Array<X509Certificate> = anchors.toTypedArray()
         }

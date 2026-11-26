@@ -1,6 +1,7 @@
 package work.luxiaoxiao.myembyhub.net
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -65,5 +66,26 @@ class TlsHostMemoryTest {
         val map = linkedMapOf(TlsHostMemory.normalize("EB.atrct.cn:443") to "conscrypt")
         val back = TlsHostMemory.decode(TlsHostMemory.encode(map))
         assertEquals("conscrypt", back["eb.atrct.cn"])
+    }
+
+    @Test
+    fun upsertSkipsWriteWhenUnchangedAndEvictsOldest() {
+        val map = linkedMapOf("a.com" to "system", "b.com" to "conscrypt")
+        // 值没变：不该触发写盘
+        assertFalse(TlsHostMemory.upsert(map, "a.com", "system"))
+        assertEquals(listOf("a.com", "b.com"), map.keys.toList())
+
+        // 值变了：返回 true 且挪到队尾刷新顺序
+        assertTrue(TlsHostMemory.upsert(map, "a.com", "conscrypt"))
+        assertEquals(listOf("b.com", "a.com"), map.keys.toList())
+        assertEquals("conscrypt", map["a.com"])
+
+        // 超过 MAX_HOSTS 时淘汰最早的
+        for (i in 1..TlsHostMemory.MAX_HOSTS) {
+            assertTrue(TlsHostMemory.upsert(map, "h$i.com", "system"))
+        }
+        assertEquals(TlsHostMemory.MAX_HOSTS, map.size)
+        assertNull(map["b.com"])
+        assertNull(map["a.com"])
     }
 }

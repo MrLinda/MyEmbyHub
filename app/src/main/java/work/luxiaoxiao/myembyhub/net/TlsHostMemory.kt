@@ -69,15 +69,36 @@ internal object TlsHostMemory {
     internal fun normalize(host: String): String =
         host.trim().lowercase().substringBefore(':').trim()
 
+    /**
+     * 更新内存表并返回是否有实质变化。
+     *
+     * 值未变时返回 `false`，调用方跳过磁盘写入 —— 避免每次 HTTPS 请求都触发闪存落盘。
+     */
+    internal fun upsert(map: LinkedHashMap<String, String>, key: String, value: String): Boolean {
+        if (map[key] == value) return false
+        // 重新插入以刷新淘汰顺序
+        map.remove(key)
+        map[key] = value
+        while (map.size > MAX_HOSTS) {
+            val oldest = map.keys.firstOrNull() ?: break
+            map.remove(oldest)
+        }
+        return true
+    }
+
     // ==================== 读写 ====================
 
-    private fun load(ctx: Context): LinkedHashMap<String, String> {
+    private val lock = Any()
+    private var cached: LinkedHashMap<String, String>? = null
+
+    private fun loadLocked(ctx: Context): LinkedHashMap<String, String> {
+        cached?.let { return it }
         val raw = try {
             prefs(ctx).getString(KEY_MAP, null)
         } catch (e: Throwable) {
             null
         }
-        return decode(raw)
+        return decode(raw).also { cached = it }
     }
 
     private fun prefs(ctx: Context) =
@@ -87,7 +108,7 @@ internal object TlsHostMemory {
     fun recall(ctx: Context, host: String): TlsStack.TlsImpl? {
         val key = normalize(host)
         if (key.isEmpty()) return null
-        val v = load(ctx)[key] ?: return null
+        val v = synchronized(lock) { loadLocked(ctx)[key] } ?: return null
         return when (v) {
             "conscrypt" -> TlsStack.TlsImpl.CONSCRYPT
             "system" -> TlsStack.TlsImpl.SYSTEM
@@ -101,17 +122,18 @@ internal object TlsHostMemory {
         val key = normalize(host)
         if (key.isEmpty()) return
         if (impl == TlsStack.TlsImpl.AUTO) return
-        val map = load(ctx)
-        // 重新插入以刷新淘汰顺序
-        map.remove(key)
-        map[key] = if (impl == TlsStack.TlsImpl.CONSCRYPT) "conscrypt" else "system"
-        while (map.size > MAX_HOSTS) {
-            val oldest = map.keys.firstOrNull() ?: break
-            map.remove(oldest)
+        val value = if (impl == TlsStack.TlsImpl.CONSCRYPT) "conscrypt" else "system"
+        val encoded: String
+        val count: Int
+        synchronized(lock) {
+            val map = loadLocked(ctx)
+            if (!upsert(map, key, value)) return
+            encoded = encode(map)
+            count = map.size
         }
         try {
-            prefs(ctx).edit().putString(KEY_MAP, encode(map)).commit()
-            Log.i(TAG, "记住 $key → $impl（共 ${map.size} 条）")
+            prefs(ctx).edit().putString(KEY_MAP, encoded).apply()
+            Log.i(TAG, "记住 $key → $impl（共 $count 条）")
         } catch (ignored: Throwable) {
         }
     }
@@ -120,29 +142,37 @@ internal object TlsHostMemory {
     fun forget(ctx: Context, host: String) {
         val key = normalize(host)
         if (key.isEmpty()) return
-        val map = load(ctx)
-        if (map.remove(key) == null) return
+        val encoded = synchronized(lock) {
+            val map = loadLocked(ctx)
+            if (map.remove(key) == null) return
+            encode(map)
+        }
         try {
-            prefs(ctx).edit().putString(KEY_MAP, encode(map)).commit()
+            prefs(ctx).edit().putString(KEY_MAP, encoded).apply()
         } catch (ignored: Throwable) {
         }
     }
 
     /** 全部清掉。 */
     fun clear(ctx: Context) {
+        synchronized(lock) {
+            cached = LinkedHashMap()
+        }
         try {
-            prefs(ctx).edit().remove(KEY_MAP).commit()
+            prefs(ctx).edit().remove(KEY_MAP).apply()
         } catch (ignored: Throwable) {
         }
     }
 
     /** 给设置页/反馈报告用：当前记了哪些域名。 */
     fun snapshot(ctx: Context): List<Pair<String, TlsStack.TlsImpl>> =
-        load(ctx).mapNotNull { (h, v) ->
-            when (v) {
-                "conscrypt" -> h to TlsStack.TlsImpl.CONSCRYPT
-                "system" -> h to TlsStack.TlsImpl.SYSTEM
-                else -> null
+        synchronized(lock) {
+            loadLocked(ctx).mapNotNull { (h, v) ->
+                when (v) {
+                    "conscrypt" -> h to TlsStack.TlsImpl.CONSCRYPT
+                    "system" -> h to TlsStack.TlsImpl.SYSTEM
+                    else -> null
+                }
             }
         }
 }

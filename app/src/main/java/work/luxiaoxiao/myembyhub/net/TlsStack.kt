@@ -1,7 +1,10 @@
 package work.luxiaoxiao.myembyhub.net
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import java.lang.reflect.Constructor
+import java.lang.reflect.Method
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
@@ -464,52 +467,101 @@ object TlsStack {
      *
      * 两个都失败也不致命：这时退回到「不带 SNI」，普通后端照样能连。
      */
+    private val reflectLock = Any()
+    @Volatile private var conscryptReflectChecked = false
+    @Volatile private var conscryptIsMethod: Method? = null
+    @Volatile private var conscryptSetHostnameMethod: Method? = null
+    @Volatile private var sni24ReflectChecked = false
+    @Volatile private var sniHostNameCtor: Constructor<*>? = null
+    @Volatile private var setServerNamesMethod: Method? = null
+    private val setHostnameMethods = HashMap<Class<*>, Method?>()
+
+    private fun ensureConscryptReflect() {
+        if (conscryptReflectChecked) return
+        synchronized(reflectLock) {
+            if (conscryptReflectChecked) return
+            try {
+                val cls = Class.forName("org.conscrypt.Conscrypt")
+                conscryptIsMethod = cls.getMethod("isConscrypt", SSLSocket::class.java)
+                conscryptSetHostnameMethod = cls.getMethod("setHostname", SSLSocket::class.java, String::class.java)
+            } catch (ignored: Throwable) {
+            }
+            conscryptReflectChecked = true
+        }
+    }
+
+    private fun ensureSni24Reflect() {
+        if (sni24ReflectChecked) return
+        synchronized(reflectLock) {
+            if (sni24ReflectChecked) return
+            try {
+                // ⚠️ 这里不能用 SSLParameter/SNIHostName 做类型声明：
+                //    那些类 API 24 才有，API 18 上连类都加载不到，
+                //    写进字节码会在校验阶段炸。全程只用 Any + 反射。
+                sniHostNameCtor = Class.forName("javax.net.ssl.SNIHostName")
+                    .getConstructor(String::class.java)
+                setServerNamesMethod = Class.forName("javax.net.ssl.SSLParameters")
+                    .getMethod("setServerNames", List::class.java)
+            } catch (ignored: Throwable) {
+            }
+            sni24ReflectChecked = true
+        }
+    }
+
+    private fun resolveSetHostname(cls: Class<*>): Method? {
+        synchronized(reflectLock) {
+            if (setHostnameMethods.containsKey(cls)) return setHostnameMethods[cls]
+            val m = try {
+                cls.getMethod("setHostname", String::class.java)
+            } catch (ignored: Throwable) {
+                try {
+                    cls.getDeclaredMethod("setHostname", String::class.java).apply { isAccessible = true }
+                } catch (ignored2: Throwable) {
+                    null
+                }
+            }
+            setHostnameMethods[cls] = m
+            return m
+        }
+    }
+
     fun applyServerName(socket: SSLSocket, host: String) {
         if (host.isEmpty()) return
 
         // ⓪ Conscrypt 自己建出来的 socket —— 它有专门的入口，
         //    走它才能把名字同时用于 SNI 和**证书主机名校验**
         //    （换栈之后 leaf 证书的 CN/SAN 校验也归 Conscrypt 管，不能漏）。
+        ensureConscryptReflect()
         try {
-            val cls = Class.forName("org.conscrypt.Conscrypt")
-            if (cls.getMethod("isConscrypt", javax.net.ssl.SSLSocket::class.java)
-                    .invoke(null, socket) == true
-            ) {
-                cls.getMethod("setHostname", javax.net.ssl.SSLSocket::class.java, String::class.java)
-                    .invoke(null, socket, host)
+            val isM = conscryptIsMethod
+            val setM = conscryptSetHostnameMethod
+            if (isM != null && setM != null && isM.invoke(null, socket) == true) {
+                setM.invoke(null, socket, host)
                 return
             }
         } catch (ignored: Throwable) {
         }
 
         // ① API 24+：SSLParameters.setServerNames
-        try {
-            // ⚠️ 这里不能用 SSLParameter/SNIHostName 做类型声明：
-            //    那些类 API 24 才有，API 18 上连类都加载不到，
-            //    写进字节码会在校验阶段炸。全程只用 Any + 反射。
-            val sniHostName: Any = Class.forName("javax.net.ssl.SNIHostName")
-                .getConstructor(String::class.java)
-                .newInstance(host)
-            val params = socket.sslParameters
-            Class.forName("javax.net.ssl.SSLParameters")
-                .getMethod("setServerNames", List::class.java)
-                .invoke(params, listOf(sniHostName))
-            socket.sslParameters = params
-            return
-        } catch (ignored: Throwable) {
+        if (Build.VERSION.SDK_INT >= 24) {
+            ensureSni24Reflect()
+            try {
+                val ctor = sniHostNameCtor
+                val setNames = setServerNamesMethod
+                if (ctor != null && setNames != null) {
+                    val sniHostName: Any = ctor.newInstance(host)
+                    val params = socket.sslParameters
+                    setNames.invoke(params, listOf(sniHostName))
+                    socket.sslParameters = params
+                    return
+                }
+            } catch (ignored: Throwable) {
+            }
         }
 
         // ② API 18：OpenSSLSocketImpl.setHostname(String)（隐藏方法）
         try {
-            socket.javaClass.getMethod("setHostname", String::class.java)
-                .invoke(socket, host)
-            return
-        } catch (ignored: Throwable) {
-        }
-        try {
-            socket.javaClass.getDeclaredMethod("setHostname", String::class.java)
-                .apply { isAccessible = true }
-                .invoke(socket, host)
+            resolveSetHostname(socket.javaClass)?.invoke(socket, host)
         } catch (ignored: Throwable) {
         }
     }
