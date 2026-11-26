@@ -492,7 +492,7 @@ class DetailActivity : Activity() {
         ImageLoader.get(this).clearMemCache()
         session.clear()
         toast("登录已过期，请重新登录")
-        startActivity(LoginActivity.expiredIntent(this))
+        startActivity(HomeActivity.loginIntent(this, "登录已过期，请重新登录"))
         finish()
         return true
     }

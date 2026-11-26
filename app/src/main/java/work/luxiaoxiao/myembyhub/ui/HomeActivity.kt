@@ -2,6 +2,7 @@ package work.luxiaoxiao.myembyhub.ui
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -312,6 +313,7 @@ class HomeActivity : Activity() {
     private var homeLoading = false
     private var autoFocusHome = false
     private var redirectingToLogin = false
+    private var loginDialog: Dialog? = null
 
     /** 媒体库清单（首页和媒体库页共用一份，避免取两遍）。 */
     private var libraries: List<MediaItem> = emptyList()
@@ -342,20 +344,26 @@ class HomeActivity : Activity() {
         // 装在这里而不是 Application：只有一个入口需要它，且幂等。
         ErrorLog.install()
 
-        if (!session.isLoggedIn) {
-            startActivity(Intent(this, LoginActivity::class.java))
-            finish()
-            return
-        }
-
         // 排序方式要赶在 buildLibraryPage 之前读回来，否则第一屏先按默认排一遍再重排
         loadSort()
         buildNav()
         buildLibraryPage()
         buildSearchPage()
+        showPage(0)
+
+        if (!session.isLoggedIn) {
+            // 未登录直接把登录悬浮窗盖在主页上，背后能透出顶栏骨架
+            suppressTabSwitch = true
+            val hint = intent.getStringExtra(EXTRA_LOGIN_HINT)
+            navBar.post {
+                if (!isFinishing && !isDestroyed && !session.isLoggedIn) {
+                    showLoginDialog(hint)
+                }
+            }
+            return
+        }
 
         // 首屏：首页先取数，焦点落在第一张卡上
-        showPage(0)
         navItems.firstOrNull()?.requestFocus()
         loadHome(focusFirst = true)
     }
@@ -1962,18 +1970,66 @@ class HomeActivity : Activity() {
         toast("TLS 实现已切换到「${tlsImplLabel()}」，建议重新登录一次")
     }
 
-    /** 接口报 401（token 失效）时自动清掉旧 token 并跳回登录页，避免整页卡在报错提示上。 */
+    /** 接口报 401（token 失效）时自动清掉旧 token 并在主页原地弹出悬浮登录窗。 */
     private fun handleAuthExpiredIfNeeded(e: Throwable?): Boolean {
         if (!work.luxiaoxiao.myembyhub.net.isAuthExpired(e)) return false
         if (redirectingToLogin || isFinishing || isDestroyed) return true
         redirectingToLogin = true
+        homeGeneration++
+        homeLoading = false
+        pageLoading.fill(false)
+        updateLoadingUi()
         EmbyHttpDataSource.clearIdlePool()
         ImageLoader.get(this).clearMemCache()
         session.clear()
-        toast("登录已过期，请重新登录")
-        startActivity(LoginActivity.expiredIntent(this))
-        finish()
+        showLoginDialog("登录已过期，请重新登录")
         return true
+    }
+
+    private fun showLoginDialog(statusHint: String? = null) {
+        if (loginDialog?.isShowing == true || isFinishing || isDestroyed) return
+        suppressTabSwitch = true
+        cancelTabSwitch()
+        cancelLibSwitch()
+        loginDialog = LoginDialog.show(
+            this,
+            statusHint = statusHint,
+            onLoggedIn = {
+                loginDialog = null
+                redirectingToLogin = false
+                api = EmbyApi(this, session.server, session.token, session.userId)
+                resetAllPagesForLogin()
+                suppressTabSwitch = false
+                switchTab(0)
+                loadHome(focusFirst = true)
+            },
+            onCancelExit = {
+                loginDialog = null
+                finish()
+            }
+        )
+    }
+
+    private fun resetAllPagesForLogin() {
+        homeGeneration++
+        homeLoading = false
+        clearHomeSections()
+        libraries = emptyList()
+        libTabs.clear()
+        libTabColumn.removeAllViews()
+        libAdapter?.submit(emptyList())
+        libIndex = 0
+        libOffset = 0
+        libAtEnd = false
+        libLoading = false
+        libShownId = ""
+        searchQuery = ""
+        searchBox.text = getString(R.string.search_box_hint)
+        searchAdapter?.submit(emptyList())
+        pageReady.fill(false)
+        pageHints.fill(null)
+        pageLoading.fill(false)
+        updateLoadingUi()
     }
 
     private fun confirmLogout() {
@@ -1981,8 +2037,9 @@ class HomeActivity : Activity() {
             EmbyHttpDataSource.clearIdlePool()
             ImageLoader.get(this).clearMemCache()
             session.clear()
-            startActivity(Intent(this, LoginActivity::class.java))
-            finish()
+            resetAllPagesForLogin()
+            switchTab(0)
+            showLoginDialog("已退出登录，请重新登录")
         }
     }
 
@@ -2103,6 +2160,8 @@ class HomeActivity : Activity() {
         // 手机扫码服务的定时线程必须显式收，否则 Activity 没了它还在跑
         phoneServer?.stop()
         phoneServer = null
+        try { loginDialog?.dismiss() } catch (_: Throwable) {}
+        loginDialog = null
         worker.shutdownNow()
         // 首页各行的取数池也必须收：Activity 没了线程还在发请求，
         // 回来的结果会 post 到一个已经 detach 的界面上（虽然守卫拦得住，但白耗 CPU 和流量）
@@ -2198,5 +2257,13 @@ class HomeActivity : Activity() {
 
         /** 排序方向存盘的 key：true = 降序。跟字段分开存，见 [libSortDesc]。 */
         private const val KEY_LIB_SORT_DESC = "lib_sort_desc"
+
+        const val EXTRA_LOGIN_HINT = "login_hint"
+
+        fun loginIntent(ctx: Context, hint: String? = null): Intent =
+            Intent(ctx, HomeActivity::class.java).apply {
+                if (!hint.isNullOrEmpty()) putExtra(EXTRA_LOGIN_HINT, hint)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            }
     }
 }

@@ -93,6 +93,12 @@
             android:name=".ui.LoginActivity"
             android:exported="true"
             android:screenOrientation="landscape"
+            android:configChanges="keyboardHidden|orientation|screenSize" />
+
+        <activity
+            android:name=".ui.HomeActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
             android:configChanges="keyboardHidden|orientation|screenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -105,12 +111,6 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <activity
-            android:name=".ui.HomeActivity"
-            android:exported="true"
-            android:screenOrientation="landscape"
-            android:configChanges="keyboardHidden|orientation|screenSize" />
 
         <activity
             android:name=".ui.DetailActivity"
