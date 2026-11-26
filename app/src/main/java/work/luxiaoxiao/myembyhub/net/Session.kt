@@ -42,6 +42,11 @@ class Session private constructor(private val sp: SharedPreferences) {
         get() = sp.getString(KEY_PASS, "") ?: ""
         set(v) = sp.edit().putString(KEY_PASS, v).apply()
 
+    /** 是否记住密码（默认开；关掉时会清掉已保存密码）。 */
+    var rememberPassword: Boolean
+        get() = sp.getBoolean(KEY_REMEMBER_PASS, true)
+        set(v) = sp.edit().putBoolean(KEY_REMEMBER_PASS, v).apply()
+
     /**
      * 在线更新的版本清单地址。
      *
@@ -148,6 +153,7 @@ class Session private constructor(private val sp: SharedPreferences) {
         private const val KEY_USER = "username"
         private const val KEY_USER_ID = "user_id"
         private const val KEY_PASS = "password"
+        private const val KEY_REMEMBER_PASS = "remember_password"
         private const val KEY_UPDATE_URL = "update_manifest_url"
         private const val KEY_FEEDBACK_URL = "feedback_url"
         private const val KEY_PLAY_STATS = "play_stats_enabled"

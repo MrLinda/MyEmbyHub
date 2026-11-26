@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReference
 class PhoneControlServer(
     private val ctx: Context,
     private val mode: String,
-    private val onLogin: (server: String, token: String, username: String, userId: String) -> Unit,
+    private val onLogin: (server: String, token: String, username: String, userId: String, password: String, rememberPassword: Boolean) -> Unit,
     private val onSearch: (String) -> Unit,
     private val onFail: (String) -> Unit,
     /**
@@ -43,8 +43,20 @@ class PhoneControlServer(
      *
      * ⚠️ **跑在 worker 线程**，改 View 必须先切主线程。
      */
-    private val onExpire: (() -> Unit)? = null
+    private val onExpire: (() -> Unit)? = null,
+    /** 读取电视端当前草稿（须线程安全，禁止在回调里直接摸 View）。 */
+    private val readDraft: (() -> LoginDraft)? = null,
+    /** 浏览器端输入变化时同步回电视端。 */
+    private val onDraft: ((LoginDraft) -> Unit)? = null
 ) {
+
+    data class LoginDraft(
+        val server: String = "",
+        val username: String = "",
+        val password: String = "",
+        val rememberPassword: Boolean = true,
+        val passwordTouched: Boolean = false
+    )
 
     companion object {
         private const val TAG = "PhoneCtrl"
@@ -113,6 +125,8 @@ class PhoneControlServer(
   button { width:100%; height:50px; margin-top:24px; font-size:17px; font-weight:600;
            background:var(--action); color:var(--on-action); border:0; border-radius:10px; }
   button:disabled { background:var(--action-disabled); color:var(--on-action-disabled); }
+  .chk { display:flex; align-items:center; gap:10px; margin:16px 0 0; font-size:14px; color:var(--fg); cursor:pointer; }
+  .chk input { width:18px; height:18px; margin:0; accent-color:var(--action); }
   #msg { margin-top:16px; padding:12px 14px; border-radius:10px; display:none; font-size:14px; }
   .ok { display:block; background:var(--ok-bg); color:var(--ok-fg); border:1px solid var(--ok-border); }
   .err { display:block; background:var(--err-bg); color:var(--err-fg); border:1px solid var(--err-border); }
@@ -130,6 +144,7 @@ class PhoneControlServer(
     <input id="username" type="text" autocomplete="username">
     <label>密码</label>
     <input id="password" type="password" autocomplete="current-password">
+    <label class="chk"><input id="remember" type="checkbox" checked><span>在电视上记住密码</span></label>
     <button id="go" onclick="doLogin()">登录到电视</button>
   </div>
 
@@ -148,11 +163,47 @@ class PhoneControlServer(
 
 <script>
 var MODE = new URLSearchParams(location.search).get('mode') || 'login';
+var passwordTouched = false;
+var draftTimer = null;
 if (MODE === 'search') {
   document.getElementById('h1').textContent = 'MyEmbyHub 电视搜索';
   document.getElementById('sub').textContent = '在手机上输入关键词，电视会立刻显示搜索结果';
   document.getElementById('loginBox').style.display = 'none';
   document.getElementById('searchBox').style.display = 'block';
+} else {
+  fetch('/api/prefill')
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if (j.server) document.getElementById('server').value = j.server;
+      if (j.username) document.getElementById('username').value = j.username;
+      if (typeof j.rememberPassword === 'boolean') {
+        document.getElementById('remember').checked = j.rememberPassword;
+      }
+      if (j.hasPassword) {
+        document.getElementById('password').placeholder = '电视已记住密码（留空则直接沿用）';
+      }
+    })
+    .catch(function(){});
+  ['server', 'username', 'password', 'remember'].forEach(function(id){
+    var el = document.getElementById(id);
+    var ev = (id === 'remember') ? 'change' : 'input';
+    el.addEventListener(ev, function(){
+      if (id === 'password') passwordTouched = true;
+      clearTimeout(draftTimer);
+      draftTimer = setTimeout(syncDraft, 160);
+    });
+  });
+}
+function syncDraft() {
+  var body = JSON.stringify({
+    server: document.getElementById('server').value.trim(),
+    username: document.getElementById('username').value.trim(),
+    password: document.getElementById('password').value,
+    passwordTouched: passwordTouched,
+    rememberPassword: document.getElementById('remember').checked
+  });
+  fetch('/api/draft', { method:'POST', headers:{'Content-Type':'application/json'}, body: body })
+    .catch(function(){});
 }
 function show(cls, text) {
   var m = document.getElementById('msg');
@@ -164,7 +215,8 @@ function doLogin() {
   var body = JSON.stringify({
     server: document.getElementById('server').value.trim(),
     username: document.getElementById('username').value.trim(),
-    password: document.getElementById('password').value
+    password: document.getElementById('password').value,
+    rememberPassword: document.getElementById('remember').checked
   });
   fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: body })
     .then(function(r){ return r.json(); })
@@ -333,9 +385,22 @@ function doSearch() {
                 method == "GET" && (path == "/" || path.startsWith("/?")) -> {
                     respond(out, 200, "text/html; charset=utf-8", PAGE_HTML)
                 }
+                method == "GET" && path == "/api/prefill" -> {
+                    val d = currentDraft()
+                    val json = org.json.JSONObject()
+                        .put("server", d.server)
+                        .put("username", d.username)
+                        .put("hasPassword", d.password.isNotEmpty())
+                        .put("rememberPassword", d.rememberPassword)
+                        .toString()
+                    respond(out, 200, JSON_TYPE, json)
+                }
                 method == "GET" && path == "/api/state" -> {
                     val state = if (busy.get()) "working" else "waiting"
                     respond(out, 200, JSON_TYPE, jsonState(state))
+                }
+                method == "POST" && path == "/api/draft" -> {
+                    handleDraft(body, out)
                 }
                 method == "POST" && path == "/api/login" -> {
                     handleLogin(body, out)
@@ -355,23 +420,62 @@ function doSearch() {
         }
     }
 
+    private fun currentDraft(): LoginDraft {
+        readDraft?.invoke()?.let { return it }
+        val s = Session.get(ctx)
+        return LoginDraft(
+            server = s.server,
+            username = s.username,
+            password = if (s.rememberPassword) s.password else "",
+            rememberPassword = s.rememberPassword
+        )
+    }
+
+    private fun handleDraft(body: String, out: OutputStream) {
+        try {
+            val json = org.json.JSONObject(body)
+            val draft = LoginDraft(
+                server = json.optString("server").trim(),
+                username = json.optString("username").trim(),
+                password = json.optString("password"),
+                rememberPassword = json.optBoolean("rememberPassword", true),
+                passwordTouched = json.optBoolean("passwordTouched", false)
+            )
+            onDraft?.invoke(draft)
+            respond(out, 200, JSON_TYPE, jsonMessage(true, "ok"))
+        } catch (e: Throwable) {
+            respond(out, 400, JSON_TYPE, jsonMessage(false, "解析草稿失败"))
+        }
+    }
+
     private fun handleLogin(body: String, out: OutputStream) {
         busy.set(true)
         try {
+            val draft = currentDraft()
             val json = org.json.JSONObject(body)
-            val user = json.optString("username").trim()
-            val pass = json.optString("password")
+            val server = json.optString("server").trim().ifEmpty { draft.server.ifEmpty { Session.get(ctx).server } }
+            val user = json.optString("username").trim().ifEmpty { draft.username.ifEmpty { Session.get(ctx).username } }
+            val rawPass = json.optString("password")
+            val pass = if (rawPass.isNotEmpty()) rawPass else draft.password
+            val remember = json.optBoolean("rememberPassword", draft.rememberPassword)
             if (user.isEmpty()) {
                 respond(out, 400, JSON_TYPE, jsonMessage(false, "请填写用户名"))
                 return
             }
 
-            // 服务器地址：手机可以覆盖，留空则用电视端已配置的
-            val server = json.optString("server").trim().ifEmpty { Session.get(ctx).server }
+            onDraft?.invoke(
+                LoginDraft(
+                    server = server,
+                    username = user,
+                    password = pass,
+                    rememberPassword = remember,
+                    passwordTouched = rawPass.isNotEmpty()
+                )
+            )
             val api = EmbyApi(ctx, server)
             val result = api.login(user, pass)
             result.onSuccess { token ->
-                onLogin(api.server, token, user, api.userId)
+                onLogin(api.server, token, user, api.userId, pass, remember)
                 respond(out, 200, JSON_TYPE, jsonMessage(true, "登录成功，电视端已接收"))
             }.onFailure { e ->
                 // 用 friendlyLoginError 而不是 e.message：报错里常常带一坨

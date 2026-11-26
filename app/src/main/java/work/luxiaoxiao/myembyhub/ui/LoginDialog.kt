@@ -6,6 +6,8 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.KeyEvent
 import android.view.View
 import android.view.Window
@@ -22,6 +24,7 @@ import work.luxiaoxiao.myembyhub.net.friendlyLoginError
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 主页居中悬浮登录窗（占屏幕宽度的 60%–80%，兼容 Android 4.3 / API 18）。
@@ -47,6 +50,7 @@ object LoginDialog {
         val etUser = dialog.findViewById<EditText>(R.id.et_user)
         val etPass = dialog.findViewById<EditText>(R.id.et_pass)
         val btnLogin = dialog.findViewById<TextView>(R.id.btn_login)
+        val btnRememberPass = dialog.findViewById<TextView>(R.id.btn_remember_pass)
         val btnQrRefresh = dialog.findViewById<TextView>(R.id.btn_qr_refresh)
         val tvStatus = dialog.findViewById<TextView>(R.id.tv_status)
         val imgQr = dialog.findViewById<ImageView>(R.id.img_qr)
@@ -61,8 +65,36 @@ object LoginDialog {
             }, "login-dialog").apply { isDaemon = true }
         }.apply { allowCoreThreadTimeOut(true) }
 
+        val session = Session.get(activity)
+        var rememberPass = session.rememberPassword
+        var syncingFromPhone = false
+        val draftRef = AtomicReference(
+            PhoneControlServer.LoginDraft(
+                server = session.server,
+                username = session.username,
+                password = if (rememberPass) session.password else "",
+                rememberPassword = rememberPass
+            )
+        )
+
         var loginServer: PhoneControlServer? = null
         var dismissed = false
+
+        fun snapshotDraft() {
+            draftRef.set(
+                PhoneControlServer.LoginDraft(
+                    server = etServer.text.toString().trim(),
+                    username = etUser.text.toString().trim(),
+                    password = etPass.text.toString(),
+                    rememberPassword = rememberPass
+                )
+            )
+        }
+
+        fun updateRememberUi() {
+            btnRememberPass.text = if (rememberPass) "☑ 记住密码" else "☐ 记住密码"
+            snapshotDraft()
+        }
 
         fun stopPhoneLogin() {
             loginServer?.stop()
@@ -70,13 +102,20 @@ object LoginDialog {
             tvQrPlaceholder.visibility = View.GONE
         }
 
-        fun saveSession(server: String, token: String, username: String, password: String, userId: String) {
-            val s = Session.get(activity)
-            s.server = server
-            s.token = token
-            s.username = username
-            if (userId.isNotEmpty()) s.userId = userId
-            if (password.isNotEmpty()) s.password = password
+        fun saveSession(
+            server: String,
+            token: String,
+            username: String,
+            password: String,
+            userId: String,
+            remember: Boolean
+        ) {
+            session.server = server
+            session.token = token
+            session.username = username
+            session.rememberPassword = remember
+            if (userId.isNotEmpty()) session.userId = userId
+            session.password = if (remember) password else ""
         }
 
         fun completeLogin() {
@@ -122,11 +161,11 @@ object LoginDialog {
                 loginServer = PhoneControlServer(
                     activity,
                     mode = PhoneControlServer.MODE_LOGIN,
-                    onLogin = { srv, token, user, userId ->
+                    onLogin = { srv, token, user, userId, pass, remember ->
                         main.post {
                             if (dismissed || activity.isFinishing || activity.isDestroyed) return@post
                             tvStatus.text = "登录成功，正在加载媒体库…"
-                            saveSession(srv, token, user, "", userId)
+                            saveSession(srv, token, user, pass, userId, remember)
                             completeLogin()
                         }
                     },
@@ -143,6 +182,35 @@ object LoginDialog {
                             tvQrPlaceholder.text = activity.getString(R.string.login_qr_expired)
                             imgQr.setImageDrawable(null)
                             tvStatus.text = activity.getString(R.string.login_qr_expired_tip)
+                        }
+                    },
+                    readDraft = { draftRef.get() },
+                    onDraft = { d ->
+                        main.post {
+                            if (dismissed || activity.isFinishing || activity.isDestroyed) return@post
+                            syncingFromPhone = true
+                            try {
+                                if (etServer.text.toString() != d.server) {
+                                    etServer.setText(d.server)
+                                    etServer.setSelection(d.server.length)
+                                }
+                                if (etUser.text.toString() != d.username) {
+                                    etUser.setText(d.username)
+                                    etUser.setSelection(d.username.length)
+                                }
+                                if (d.passwordTouched && etPass.text.toString() != d.password) {
+                                    etPass.setText(d.password)
+                                    etPass.setSelection(d.password.length)
+                                }
+                                if (rememberPass != d.rememberPassword) {
+                                    rememberPass = d.rememberPassword
+                                    session.rememberPassword = rememberPass
+                                    if (!rememberPass) session.password = ""
+                                }
+                                updateRememberUi()
+                            } finally {
+                                syncingFromPhone = false
+                            }
                         }
                     }
                 )
@@ -177,7 +245,7 @@ object LoginDialog {
                     if (dismissed || activity.isFinishing || activity.isDestroyed) return@post
                     btnLogin.isEnabled = true
                     result.onSuccess { token ->
-                        saveSession(api.server, token, user, pass, api.userId)
+                        saveSession(api.server, token, user, pass, api.userId, rememberPass)
                         completeLogin()
                     }.onFailure { e ->
                         tvStatus.text = activity.getString(R.string.login_failed) + "：" +
@@ -187,11 +255,28 @@ object LoginDialog {
             }
         }
 
-        val session = Session.get(activity)
         etServer.setText(session.server)
         etUser.setText(session.username)
-        etPass.setText(session.password)
+        etPass.setText(if (rememberPass) session.password else "")
+        updateRememberUi()
 
+        val draftWatcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (!syncingFromPhone) snapshotDraft()
+            }
+        }
+        etServer.addTextChangedListener(draftWatcher)
+        etUser.addTextChangedListener(draftWatcher)
+        etPass.addTextChangedListener(draftWatcher)
+
+        btnRememberPass.setOnClickListener {
+            rememberPass = !rememberPass
+            session.rememberPassword = rememberPass
+            if (!rememberPass) session.password = ""
+            updateRememberUi()
+        }
         btnLogin.setOnClickListener { doLogin() }
         btnQrRefresh.setOnClickListener { startPhoneLogin() }
 

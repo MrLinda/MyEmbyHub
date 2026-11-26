@@ -1402,7 +1402,7 @@ class HomeActivity : Activity() {
             phoneServer = PhoneControlServer(
                 this,
                 mode = PhoneControlServer.MODE_SEARCH,
-                onLogin = { _, _, _, _ -> },
+                onLogin = { _, _, _, _, _, _ -> },
                 onSearch = { term ->
                     main.post {
                         qrDialog?.dismiss()
