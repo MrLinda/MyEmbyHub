@@ -311,6 +311,7 @@ class HomeActivity : Activity() {
     @Volatile private var homeGeneration = 0
     private var homeLoading = false
     private var autoFocusHome = false
+    private var redirectingToLogin = false
 
     /** 媒体库清单（首页和媒体库页共用一份，避免取两遍）。 */
     private var libraries: List<MediaItem> = emptyList()
@@ -578,6 +579,7 @@ class HomeActivity : Activity() {
         var firstFailure: Throwable? = null
 
         fun finished(error: Throwable? = null) {
+            if (handleAuthExpiredIfNeeded(error)) return
             if (firstFailure == null) firstFailure = error
             if (--pending != 0) return
             homeLoading = false
@@ -1036,7 +1038,10 @@ class HomeActivity : Activity() {
                 }
                 buildLibTabs()
                 selectLibrary(0, focusGrid = false)
-            }.onFailure { showHint(getString(R.string.home_failed, friendlyError(it)), 1) }
+            }.onFailure {
+                if (handleAuthExpiredIfNeeded(it)) return@onFailure
+                showHint(getString(R.string.home_failed, friendlyError(it)), 1)
+            }
         }
     }
 
@@ -1207,6 +1212,7 @@ class HomeActivity : Activity() {
                         else if (focusGrid && tabIndex == 1) focusGrid(libGrid)
                     }
                 }.onFailure {
+                    if (handleAuthExpiredIfNeeded(it)) return@onFailure
                     revealPage(1)
                     showHint(getString(R.string.home_failed, friendlyError(it)), 1)
                 }
@@ -1365,7 +1371,10 @@ class HomeActivity : Activity() {
                     searchAdapter?.submit(list)
                     if (list.isEmpty()) showHint(getString(R.string.search_empty), 2)
                     else hideHint(2)
-                }.onFailure { showHint(getString(R.string.search_failed, friendlyError(it)), 2) }
+                }.onFailure {
+                    if (handleAuthExpiredIfNeeded(it)) return@onFailure
+                    showHint(getString(R.string.search_failed, friendlyError(it)), 2)
+                }
             }
         }
     }
@@ -1602,6 +1611,7 @@ class HomeActivity : Activity() {
                 val detail = r.getOrNull()
                 val msId = detail?.mediaSourceId.orEmpty()
                 if (msId.isEmpty()) {
+                    if (handleAuthExpiredIfNeeded(r.exceptionOrNull())) return@post
                     toast(friendlyError(r.exceptionOrNull() ?: IllegalStateException("没有可播放的媒体源")))
                 } else {
                     startPlayer(item, msId, startMs, detail?.seriesId.orEmpty().ifEmpty { item.seriesId })
@@ -1950,6 +1960,20 @@ class HomeActivity : Activity() {
         // 但留着会在下次切回「自动」时把旧结论又翻出来，容易看花眼）
         TlsHostMemory.clear(this)
         toast("TLS 实现已切换到「${tlsImplLabel()}」，建议重新登录一次")
+    }
+
+    /** 接口报 401（token 失效）时自动清掉旧 token 并跳回登录页，避免整页卡在报错提示上。 */
+    private fun handleAuthExpiredIfNeeded(e: Throwable?): Boolean {
+        if (!work.luxiaoxiao.myembyhub.net.isAuthExpired(e)) return false
+        if (redirectingToLogin || isFinishing || isDestroyed) return true
+        redirectingToLogin = true
+        EmbyHttpDataSource.clearIdlePool()
+        ImageLoader.get(this).clearMemCache()
+        session.clear()
+        toast("登录已过期，请重新登录")
+        startActivity(LoginActivity.expiredIntent(this))
+        finish()
+        return true
     }
 
     private fun confirmLogout() {

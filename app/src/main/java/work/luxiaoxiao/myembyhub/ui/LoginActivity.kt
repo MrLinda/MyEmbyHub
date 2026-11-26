@@ -1,6 +1,7 @@
 package work.luxiaoxiao.myembyhub.ui
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -77,6 +78,9 @@ class LoginActivity : Activity() {
 
         // 默认就是扫码：不用点，直接起服务画码
         startPhoneLogin()
+        intent.getStringExtra(EXTRA_STATUS_HINT)?.takeIf { it.isNotEmpty() }?.let {
+            tvStatus.text = it
+        }
         // 焦点落在「刷新二维码」上：遥控器一进来就有个明确的可按项，
         // 而不是停在某个输入框里让用户以为自己要开始打字
         btnQrRefresh.post { btnQrRefresh.requestFocus() }
@@ -280,5 +284,13 @@ class LoginActivity : Activity() {
          * 空字符串 → 让用户自己填自己的服务器。
          */
         const val DEFAULT_SERVER = ""
+        const val EXTRA_STATUS_HINT = "status_hint"
+
+        /** 登录态失效后跳回登录页，清掉后面的页面栈并保留提示文案。 */
+        fun expiredIntent(ctx: Context, hint: String = "登录已过期，请重新登录"): Intent =
+            Intent(ctx, LoginActivity::class.java).apply {
+                putExtra(EXTRA_STATUS_HINT, hint)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            }
     }
 }

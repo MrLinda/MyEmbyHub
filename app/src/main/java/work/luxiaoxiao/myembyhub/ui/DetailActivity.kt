@@ -81,6 +81,7 @@ class DetailActivity : Activity() {
 
     private val episodes = ArrayList<MediaItem>()
     private val epAdapter = EpisodeAdapter()
+    private var redirectingToLogin = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -140,9 +141,11 @@ class DetailActivity : Activity() {
         val d = r.getOrNull()
         if (d == null) {
             main.post {
+                val err = r.exceptionOrNull()
+                if (handleAuthExpiredIfNeeded(err)) return@post
                 tvOverview.text = getString(
                     R.string.detail_failed,
-                    friendlyError(r.exceptionOrNull() ?: IllegalStateException("空响应"))
+                    friendlyError(err ?: IllegalStateException("空响应"))
                 )
             }
             return
@@ -383,6 +386,7 @@ class DetailActivity : Activity() {
                 tvLoading.visibility = View.GONE
                 val msId = r.getOrNull()?.mediaSourceId.orEmpty()
                 if (msId.isEmpty()) {
+                    if (handleAuthExpiredIfNeeded(r.exceptionOrNull())) return@post
                     toast(friendlyError(r.exceptionOrNull() ?: IllegalStateException("没有可播放的媒体源")))
                 } else {
                     startPlayer(target, msId, playStartMs)
@@ -478,6 +482,19 @@ class DetailActivity : Activity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideSystemBars()
+    }
+
+    private fun handleAuthExpiredIfNeeded(e: Throwable?): Boolean {
+        if (!work.luxiaoxiao.myembyhub.net.isAuthExpired(e)) return false
+        if (redirectingToLogin || isFinishing || isDestroyed) return true
+        redirectingToLogin = true
+        work.luxiaoxiao.myembyhub.net.EmbyHttpDataSource.clearIdlePool()
+        ImageLoader.get(this).clearMemCache()
+        session.clear()
+        toast("登录已过期，请重新登录")
+        startActivity(LoginActivity.expiredIntent(this))
+        finish()
+        return true
     }
 
     private fun toast(msg: String) {

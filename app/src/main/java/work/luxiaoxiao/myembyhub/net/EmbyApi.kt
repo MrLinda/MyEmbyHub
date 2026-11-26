@@ -598,6 +598,30 @@ class EmbyApi(
 }
 
 /**
+ * 判断异常是否属于「登录态失效（401）」。
+ *
+ * 只认明确的 `HTTP 401` 或 Android 4.3 无 `WWW-Authenticate` 头的
+ * `No authentication challenges`，避免把含 `401` 的条目 id / 端口号误判成掉登录。
+ */
+fun isAuthExpired(e: Throwable?): Boolean {
+    var cur = e
+    var depth = 0
+    while (cur != null && depth < 8) {
+        val msg = cur.message
+        if (msg != null && (
+                msg.contains("HTTP 401", ignoreCase = true) ||
+                    msg.contains("No authentication challenges", ignoreCase = true)
+                )
+        ) {
+            return true
+        }
+        cur = cur.cause
+        depth++
+    }
+    return false
+}
+
+/**
  * 把底层异常翻成用户能看懂的话。
  *
  * ⚠️ 直接 `e.message` 抛到界面上，用户会看到

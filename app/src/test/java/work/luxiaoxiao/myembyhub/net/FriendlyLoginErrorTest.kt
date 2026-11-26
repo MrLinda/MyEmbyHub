@@ -1,6 +1,7 @@
 package work.luxiaoxiao.myembyhub.net
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -50,5 +51,17 @@ class FriendlyLoginErrorTest {
     fun emptyMessage_fallsBackToClassName() {
         val e = IllegalStateException()
         assertEquals("IllegalStateException", friendlyLoginError(e))
+    }
+
+    @Test
+    fun isAuthExpired_detects401AndNoAuthChallengesInCauseChain() {
+        assertTrue(isAuthExpired(IllegalStateException("HTTP 401（token 无效或已过期）")))
+        assertTrue(isAuthExpired(IllegalStateException("HTTP 401 ")))
+        assertTrue(isAuthExpired(IOException("No authentication challenges found")))
+        assertTrue(isAuthExpired(RuntimeException("outer", IOException("No authentication challenges found"))))
+
+        assertFalse(isAuthExpired(null))
+        assertFalse(isAuthExpired(IllegalStateException("HTTP 403 Forbidden")))
+        assertFalse(isAuthExpired(IllegalStateException("HTTP 404 item 14010 not found")))
     }
 }
