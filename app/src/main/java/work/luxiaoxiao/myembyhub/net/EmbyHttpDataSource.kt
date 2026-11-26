@@ -63,7 +63,8 @@ class EmbyHttpDataSource(
         private const val TAG = "TvCheck"
         /** 最多跟几跳重定向。 */
         private const val MAX_REDIRECTS = 5
-        private const val REDIRECT_TTL_MS = 15_000L
+        private const val REDIRECT_TTL_MS = 5 * 60_000L
+        private const val REDIRECT_REJECT_WINDOW_MS = 15_000L
         private const val CONNECT_TIMEOUT_MS = 10000
         private const val INITIAL_EMBY_RESPONSE_TIMEOUT_MS = 15000
         private const val READ_TIMEOUT_MS = 30000
@@ -131,9 +132,12 @@ class EmbyHttpDataSource(
             }
         }
 
-        /** 把读干净的连接放回池子；池满或连接已不可用就直接关掉。 */
+        /** 把读干净的连接放回池子；覆盖同 key 时先关掉旧连接，池满则淘汰最老的。 */
         private fun releaseIdle(key: String, socket: Socket) {
             synchronized(poolLock) {
+                idlePool.remove(key)?.let { prev ->
+                    try { prev.socket.close() } catch (ignored: Throwable) {}
+                }
                 if (idlePool.size >= MAX_IDLE_SOCKETS) {
                     val oldest = idlePool.entries.minByOrNull { it.value.idleSince }
                     if (oldest != null) {
@@ -260,27 +264,47 @@ class EmbyHttpDataSource(
         return bytesToRead
     }
 
-    /** 从刚打开的响应头部探测容器，保留原来的读取位置和长度。 */
-    internal fun peekPrefix(length: Int): ByteArray {
+    /**
+     * 从刚打开的响应头部探测容器，保留原来的读取位置和长度。
+     *
+     * 先读 [initialLength] 字节，只有 [needFull] 返回 true（比如前 16 字节不是已知容器魔数）
+     * 才继续读满 [fullLength] 字节 —— 普通 MKV/MP4 起播不必干等 32KB。
+     */
+    internal fun peekPrefix(
+        initialLength: Int,
+        fullLength: Int = initialLength,
+        needFull: (ByteArray, Int) -> Boolean = { _, _ -> true }
+    ): ByteArray {
         val stream = body ?: throw IOException("连接未打开")
-        val count = if (bytesToRead < 0) length else minOf(length.toLong(), bytesToRead).toInt()
-        require(skipBytes == 0L && count <= STREAM_BUFFER_BYTES)
-        val prefix = ByteArray(count)
-        stream.mark(count)
+        val maxCount = if (bytesToRead < 0) fullLength else minOf(fullLength.toLong(), bytesToRead).toInt()
+        require(skipBytes == 0L && maxCount <= STREAM_BUFFER_BYTES)
+        val firstCount = minOf(initialLength, maxCount)
+        val head = ByteArray(firstCount)
+        stream.mark(maxCount)
         val started = SystemClock.elapsedRealtime()
         var read = 0
         try {
-            while (read < count) {
-                val n = stream.read(prefix, read, count - read)
+            while (read < firstCount) {
+                val n = stream.read(head, read, firstCount - read)
                 if (n < 0) break
                 read += n
             }
+            if (read < firstCount || firstCount == maxCount || !needFull(head, read)) {
+                return if (read == firstCount) head else head.copyOf(read)
+            }
+            val full = ByteArray(maxCount)
+            System.arraycopy(head, 0, full, 0, read)
+            while (read < maxCount) {
+                val n = stream.read(full, read, maxCount - read)
+                if (n < 0) break
+                read += n
+            }
+            return if (read == maxCount) full else full.copyOf(read)
         } finally {
             stream.reset()
             val elapsed = SystemClock.elapsedRealtime() - started
             if (elapsed >= 1000L) Log.i(TAG, "streamPrefix bytes=$read elapsed=${elapsed}ms")
         }
-        return if (read == count) prefix else prefix.copyOf(read)
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
@@ -356,6 +380,7 @@ class EmbyHttpDataSource(
             val hop = if (redirects == 0) "origin" else "redirect"
             val resp = request(url, spec.position, spec.length, spec.httpRequestHeaders, hop)
             if (resp.code !in 300..399) return url to resp
+            var recycled = false
             try {
                 val location = resp.header("location")
                     ?: throw IOException("HTTP ${resp.code} 但响应里没有 Location 头  ← $url")
@@ -363,18 +388,45 @@ class EmbyHttpDataSource(
                 val next = resolve(url, location)
                 Log.i(TAG, "GET $url → ${resp.code}, Location=$next")
                 url = next
+                recycled = tryRecycleRedirectResponse(resp)
             } finally {
-                resp.closeQuietly()
+                if (!recycled) resp.closeQuietly()
             }
         }
+    }
+
+    /** 302 响应体很小时（常见 Content-Length: 0）把体排空并还回连接池，供后续选集/接口复用。 */
+    private fun tryRecycleRedirectResponse(resp: HttpResponse): Boolean {
+        val key = resp.poolKey ?: return false
+        if (resp.header("transfer-encoding") != null) return false
+        val contentLen = resp.header("content-length")?.toLongOrNull() ?: return false
+        if (contentLen !in 0L..4096L) return false
+        var remaining = contentLen
+        if (remaining > 0L) {
+            val buf = ByteArray(minOf(remaining, 1024L).toInt())
+            while (remaining > 0L) {
+                val n = try {
+                    resp.body.read(buf, 0, minOf(remaining, buf.size.toLong()).toInt())
+                } catch (_: Throwable) {
+                    return false
+                }
+                if (n <= 0) return false
+                remaining -= n
+            }
+        }
+        val s = resp.socket
+        if (!s.isConnected || s.isClosed || s.isInputShutdown || s.isOutputShutdown) return false
+        releaseIdle(key, s)
+        return true
     }
 
     /** MP4 可连续读开头、文件尾部索引和续播位置。短时间内可直接请求同一条取流地址。 */
     private fun reuseRedirect(original: String, spec: DataSpec): Pair<String, HttpResponse>? {
         if (spec.position == 0L) return null
         val cached = recentRedirect ?: return null
+        val age = SystemClock.elapsedRealtime() - cached.openedAt
         if (cached.original != original || cached.requestHeaders != spec.httpRequestHeaders ||
-            SystemClock.elapsedRealtime() - cached.openedAt >= REDIRECT_TTL_MS
+            age >= REDIRECT_TTL_MS
         ) return null
         val resp = try {
             request(cached.target, spec.position, spec.length, spec.httpRequestHeaders, "cached")
@@ -388,7 +440,12 @@ class EmbyHttpDataSource(
             return cached.target to resp
         }
         resp?.closeQuietly()
-        rejectedRedirectOriginal = original
+        // 刚拿到的新跳转地址立刻不支持 Range 才拉黑；放久了过期（403）只清缓存让下次重拿 302
+        if (age < REDIRECT_REJECT_WINDOW_MS) {
+            rejectedRedirectOriginal = original
+        } else {
+            recentRedirect = null
+        }
         Log.i(TAG, "取流地址不可复用，重新请求服务端")
         return null
     }
@@ -576,6 +633,7 @@ class EmbyHttpDataSource(
         }
         val plain = Socket()
         try {
+            try { plain.tcpNoDelay = true } catch (_: Throwable) {}
             timing.measure("tcp") { plain.connect(address, CONNECT_TIMEOUT_MS) }
             return plain
         } catch (e: Exception) {
@@ -602,6 +660,7 @@ class EmbyHttpDataSource(
         //    挂在 Cloudflare 前面的服务器会**直接拒握手**。
         //    （业务接口走 HttpsURLConnection，libcore 内部会设，所以只有取流挂）
         try {
+            try { ssl.tcpNoDelay = true } catch (_: Throwable) {}
             TlsStack.applyServerName(ssl, host)
             timing.measure("tcp") { ssl.connect(address, CONNECT_TIMEOUT_MS) }
             timing.measure("tls") { ssl.startHandshake() }

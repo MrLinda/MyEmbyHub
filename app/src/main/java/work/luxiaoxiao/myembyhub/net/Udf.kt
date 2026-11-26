@@ -98,6 +98,36 @@ object Udf {
         bytes.size >= offset + 1 + BEA_ID.size && BEA_ID.indices.all { bytes[offset + 1 + it] == BEA_ID[it] }
 
     /**
+     * 仅凭流开头十几个字节判断是否已经是常见的非 ISO 容器（MKV / MP4 / AVI / FLV / Ogg / ASF）。
+     * 命中时可以直接交给 ExoPlayer，不必白等 32KB 去检查偏移 0x8000 的 BEA01。
+     */
+    internal fun looksLikeKnownNonIso(bytes: ByteArray, length: Int = bytes.size): Boolean {
+        if (length < 4) return false
+        val b0 = bytes[0].toInt() and 0xFF
+        val b1 = bytes[1].toInt() and 0xFF
+        val b2 = bytes[2].toInt() and 0xFF
+        val b3 = bytes[3].toInt() and 0xFF
+        // MKV / WebM (EBML)
+        if (b0 == 0x1A && b1 == 0x45 && b2 == 0xDF && b3 == 0xA3) return true
+        // AVI / WAV (RIFF)
+        if (b0 == 'R'.code && b1 == 'I'.code && b2 == 'F'.code && b3 == 'F'.code) return true
+        // FLV
+        if (b0 == 'F'.code && b1 == 'L'.code && b2 == 'V'.code && b3 == 0x01) return true
+        // Ogg
+        if (b0 == 'O'.code && b1 == 'g'.code && b2 == 'g'.code && b3 == 'S'.code) return true
+        // ASF / WMV
+        if (b0 == 0x30 && b1 == 0x26 && b2 == 0xB2 && b3 == 0x75) return true
+        // MP4 / MOV / M4V / 3GP (ftyp at offset 4)
+        if (length >= 8 &&
+            bytes[4].toInt() == 'f'.code &&
+            bytes[5].toInt() == 't'.code &&
+            bytes[6].toInt() == 'y'.code &&
+            bytes[7].toInt() == 'p'.code
+        ) return true
+        return false
+    }
+
+    /**
      * 解析出正片。失败返回 null（调用方退回「直接播原始流」的老路径）。
      *
      * @param onStep 进度回调（解析要发若干次 Range 请求，界面上给句话，别让用户以为卡死）
@@ -204,8 +234,9 @@ object Udf {
             val streamEntries = readDir(reader, partStart, metaStart, streamFe)
 
             onStep("查找正片（STREAM 里 ${streamEntries.size} 个文件）")
-            // 正片 = STREAM 里体积最大的 m2ts（实测这张盘只有一个：00000.m2ts）
-            var best: Video? = null
+            // 正片 = STREAM 里体积最大的 m2ts（先挑出最大的，再只探一次它的包头）
+            var bestName = ""
+            var bestFe: Fe? = null
             var bestBytes = 0L
             for (e in streamEntries) {
                 val lower = e.name.lowercase()
@@ -213,23 +244,24 @@ object Udf {
                 val fe = readFe(reader, partStart, metaStart, e.partRef, e.icbLoc) ?: continue
                 if (fe.fileType == FT_DIR || fe.size <= 0 || fe.extents.isEmpty()) continue
                 if (fe.size <= bestBytes) continue
-                val head = reader.readAt(fe.extents[0].start, 1024)
-                val detected = detectPacketSize(head)
-                    ?: return fail(onStep, "m2ts 分包结构认不出来（头 ${head.take(8).joinToString(" ") { "%02X".format(it) }}）")
-                val (pkt, prefix) = detected
-                val total = fe.extents.fold(0L) { acc, x -> acc + x.length }
-                val packets = total / pkt
-                best = Video(
-                    name = e.name,
-                    extents = fe.extents,
-                    packetSize = pkt,
-                    prefixLen = prefix,
-                    logicalLength = packets * (pkt - prefix)
-                )
+                bestName = e.name
+                bestFe = fe
                 bestBytes = fe.size
             }
-            if (best == null) return fail(onStep, "STREAM 里没有可用的 m2ts")
-            return best
+            if (bestFe == null) return fail(onStep, "STREAM 里没有可用的 m2ts")
+            val head = reader.readAt(bestFe.extents[0].start, 1024)
+            val detected = detectPacketSize(head)
+                ?: return fail(onStep, "m2ts 分包结构认不出来（头 ${head.take(8).joinToString(" ") { "%02X".format(it) }}）")
+            val (pkt, prefix) = detected
+            val total = bestFe.extents.fold(0L) { acc, x -> acc + x.length }
+            val packets = total / pkt
+            return Video(
+                name = bestName,
+                extents = bestFe.extents,
+                packetSize = pkt,
+                prefixLen = prefix,
+                logicalLength = packets * (pkt - prefix)
+            )
         } catch (e: Exception) {
             return fail(onStep, "解析中断：${e.message}")
         }

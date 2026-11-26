@@ -28,13 +28,13 @@ internal class IsoRawReader(
 
     private companion object {
         private const val METADATA_BLOCK_BYTES = 64 * 1024
+        private const val MAX_METADATA_BLOCKS = 4
     }
 
     private var nextOffset = -1L
     private var rangeLeft = 0L
     private var metadataLength = 0L
-    private var metadataOffset = -1L
-    private var metadata: ByteArray? = null
+    private val metadataBlocks = LinkedHashMap<Long, ByteArray>(8, 0.75f, true)
     var requestHeaders: Map<String, String> = emptyMap()
 
     override fun readAt(offset: Long, length: Int): ByteArray {
@@ -42,16 +42,20 @@ internal class IsoRawReader(
         val blockOffset = offset / METADATA_BLOCK_BYTES * METADATA_BLOCK_BYTES
         val inBlock = (offset - blockOffset).toInt()
         if (length <= 2048 && inBlock + length <= METADATA_BLOCK_BYTES && offset <= metadataLength - length) {
-            if (metadataOffset != blockOffset) {
+            var block = metadataBlocks[blockOffset]
+            if (block == null) {
                 val blockLength = minOf(metadataLength - blockOffset, METADATA_BLOCK_BYTES.toLong()).toInt()
                 try {
-                    metadata = readRange(blockOffset, blockLength)
-                    metadataOffset = blockOffset
+                    block = readRange(blockOffset, blockLength)
+                    if (metadataBlocks.size >= MAX_METADATA_BLOCKS) {
+                        val oldest = metadataBlocks.keys.firstOrNull()
+                        if (oldest != null) metadataBlocks.remove(oldest)
+                    }
+                    metadataBlocks[blockOffset] = block
                 } catch (_: IOException) {
                     return readRange(offset, length)
                 }
             }
-            val block = checkNotNull(metadata)
             return block.copyOfRange(inBlock, inBlock + length)
         }
         return readRange(offset, length)
@@ -63,8 +67,7 @@ internal class IsoRawReader(
             parse()
         } finally {
             metadataLength = 0
-            metadataOffset = -1
-            metadata = null
+            metadataBlocks.clear()
         }
     }
 
@@ -150,7 +153,7 @@ internal class M2tsDataSource(
     companion object {
         private const val TS_PACKET_BYTES = 188
         private const val WINDOW_PACKETS = 256
-        private const val MAX_RANGE_BYTES = 8L * 1024 * 1024
+        private const val MAX_RANGE_BYTES = 16L * 1024 * 1024
     }
 
     private var listener: TransferListener? = null
@@ -306,7 +309,10 @@ class IsoDataSource(
                     C.LENGTH_UNSET.toLong()
                 }
                 val isIso = if (canPeek) {
-                    Udf.looksLikeIso(httpSource.peekPrefix(probeLength), Udf.VRS_OFFSET)
+                    val prefix = httpSource.peekPrefix(16, probeLength) { head, len ->
+                        !Udf.looksLikeKnownNonIso(head, len)
+                    }
+                    Udf.looksLikeIso(prefix, Udf.VRS_OFFSET)
                 } else {
                     val vrs = try {
                         raw.readAt(Udf.VRS_OFFSET.toLong(), Udf.VRS_BYTES)
