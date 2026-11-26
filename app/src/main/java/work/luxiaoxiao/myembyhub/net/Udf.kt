@@ -76,6 +76,9 @@ object Udf {
     }
 
     private const val SECTOR = 2048L
+    internal const val VRS_OFFSET = 16 * 2048
+    internal const val VRS_BYTES = 8
+    private val BEA_ID = "BEA01".toByteArray(Charsets.US_ASCII)
 
     private const val TAG_ANCHOR = 2
     private const val TAG_PD = 5
@@ -90,16 +93,9 @@ object Udf {
     /** UDF 2.50 元数据分区文件。 */
     private const val FT_METADATA = 250
 
-    /** ISO 是不是 UDF。只看卷识别序列，一次 8 字节的 Range 就够了。 */
-    fun looksLikeIso(reader: RawReader): Boolean {
-        return try {
-            // VRS 在 sector 16（偏移 32768），第一个描述符以 "BEA01" 开头。
-            val vrs = reader.readAt(16 * SECTOR, 8)
-            vrs.size >= 6 && vrs.copyOfRange(1, 6).contentEquals("BEA01".toByteArray())
-        } catch (e: Exception) {
-            false
-        }
-    }
+    /** 卷识别序列的第一个描述符标识位于偏移 32768 的后 5 个字节。 */
+    internal fun looksLikeIso(bytes: ByteArray, offset: Int): Boolean =
+        bytes.size >= offset + 1 + BEA_ID.size && BEA_ID.indices.all { bytes[offset + 1 + it] == BEA_ID[it] }
 
     /**
      * 解析出正片。失败返回 null（调用方退回「直接播原始流」的老路径）。
@@ -176,8 +172,7 @@ object Udf {
             // （tsMuxeR 自己的排法）。与其猜，不如把整块扫一遍、逐个验证
             // 「那个块确实是个目录条目」—— 这一步只有 2~3 次网络读，划算。
             onStep("定位根目录")
-            var rootLoc = -1L
-            var rootPref = 0
+            var root: Fe? = null
             var off = 16
             while (off + 16 <= fsd.size) {
                 val len = u32(fsd, off)
@@ -186,17 +181,13 @@ object Udf {
                 if (len == SECTOR && loc in 1L..2_000_000L && pref <= 2) {
                     val probe = readFe(reader, partStart, metaStart, pref, loc)
                     if (probe != null && probe.fileType == FT_DIR) {
-                        rootLoc = loc
-                        rootPref = pref
+                        root = probe
                         break
                     }
                 }
                 off += 4
             }
-            if (rootLoc < 0) return fail(onStep, "FSD 里没有指向目录的 long_ad，定位不到根目录")
-
-            val root = readFe(reader, partStart, metaStart, rootPref, rootLoc)
-                ?: return fail(onStep, "根目录 ICB 读不到")
+            if (root == null) return fail(onStep, "FSD 里没有指向目录的 long_ad，定位不到根目录")
             val rootEntries = readDir(reader, partStart, metaStart, root)
             onStep("进入 BDMV/STREAM（根目录 ${rootEntries.size} 项）")
             val bdmv = rootEntries.firstOrNull { it.name.equals("BDMV", ignoreCase = true) }

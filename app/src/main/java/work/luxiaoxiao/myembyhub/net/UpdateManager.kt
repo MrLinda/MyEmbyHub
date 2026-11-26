@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import android.widget.Toast
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -22,8 +23,12 @@ import work.luxiaoxiao.myembyhub.BuildConfig
  *      "size": 2174365, "notes": "修复扫码登录" }
  *    ```
  * 2. `versionCode` 比当前 App 大 → 有新版
- * 3. 下载 APK 到 `/sdcard/Download/`
- * 4. 调起系统安装器（这一步仍然需要用户在电视上按一次「安装」——
+ * 3. 下载 APK 到「安装器读得到、本 App 写得进」的目录（见 [resolveDownloadDir]：
+ *    外部私有目录 → `/sdcard/Download` → `filesDir/update` 三选一）
+ * 4. 调起系统安装器：API 24+ 用 FileProvider 的 `content://`（`file://` 会抛
+ *    FileUriExposedException）；API 18~23 只能用 `file://`
+ *    （4.3 的安装器不接 `content://`），所以老系统上要求 APK 落在共享存储上
+ *    （这一步仍然需要用户在电视上按一次「安装」——
  *    shell 之外的 uid 都没有 `INSTALL_PACKAGES` 权限，绕不过去）
  *
  * ## 为什么用 `releases/latest/download/<资产名>`
@@ -59,6 +64,31 @@ class UpdateManager(private val ctx: Context) {
     companion object {
         private const val TAG = "Update"
         private const val APK_NAME = "myembyhub-update.apk"
+
+        /**
+         * 安装器认的 MIME。
+         *
+         * ⚠️ 这个字符串必须和 AndroidManifest.xml 里 `<queries>` 那段的
+         *    `<data android:mimeType="…" />` **逐字一致** —— Android 11+ 收紧包可见性后，
+         *    这里换个写法（比如 `application/vnd.android.package-archive` 写成
+         *    `application/octet-stream`）系统就找不到安装器，`startActivity` 抛
+         *    ActivityNotFoundException。
+         */
+        private const val APK_MIME = "application/vnd.android.package-archive"
+
+        /** 没拿到「安装未知应用」授权时的提示（跳设置页以后本 App 就不在前台了，只能靠 Toast）。 */
+        private const val UNKNOWN_SOURCES_HINT =
+            "需要在「安装未知应用」里允许本应用安装，允许后返回再点一次更新"
+
+        /**
+         * 老系统 + 外置存储不可用时的提示。
+         *
+         * Android 4.4 及以下的 `PackageInstallerActivity` 只声明了 `scheme="file"`，
+         * 拿不到共享存储上的路径就没法把包交给它 —— 换 `content://` 会直接
+         * `ActivityNotFoundException`（实测）。这种情况只会出现在外置存储没挂载的机器上。
+         */
+        private const val OLD_SYSTEM_NO_STORAGE_HINT =
+            "这个安装包在应用私有目录里，Android 4.4 及以下的系统安装器读不到。请检查 SD 卡 / 外置存储后重试"
 
         /** 单个候选的等待时间：电视上等太久不如赶紧换下一个。 */
         private const val CONNECT_TIMEOUT = 6000
@@ -202,19 +232,32 @@ class UpdateManager(private val ctx: Context) {
         onError: (String) -> Unit
     ) {
         worker.execute {
-            // ⚠️ API 18 上写外置存储需要 WRITE_EXTERNAL_STORAGE，
-            //    没声明的话会抛 FileNotFoundException: (Permission denied)。
-            //    而且外置存储本身可能没挂载（模拟器 AVD 上 `/storage/sdcard`
-            //    就是 `dr-xr-xr-x` 只读）→ 目录必须**按可用性挑**，不能写死。
+            // 目录只要求「本 App 能写」—— 能不能装上取决于 Uri 怎么给（见 install），
+            // 不取决于落在哪个分区。所以这里不再挑 /sdcard/Download。
             val dir = resolveDownloadDir()
             if (dir == null) {
                 onError(
                     "下载失败：没有可写目录。\n" +
-                        "外置存储不可用（模拟器常见），应用私有目录也建不出来。"
+                        "外置存储不可用，应用私有目录也建不出来。"
                 )
                 return@execute
             }
-            Log.i(TAG, "下载目录 ${dir.file.absolutePath}（${dir.source}）")
+            Log.i(TAG, "下载目录 ${dir.absolutePath}")
+
+            // ⚠️ API < 24 的安装器只吃 `file://`（见 [apkUri]），而它是另一个 uid，
+            //    顺着路径读不到应用私有目录（0700）。落到那儿的结果是
+            //    「下载完整、安装器弹一句 Parse error」—— 用户完全看不出原因。
+            //    与其让他拿到一个装不上的包，不如现在就停下来说清楚。
+            if (android.os.Build.VERSION.SDK_INT < 24 && !isOnSharedStorage(dir)) {
+                Log.e(TAG, "外置存储不可用，老系统的安装器读不到应用私有目录：${dir.absolutePath}")
+                onError(
+                    "更新需要外置存储。\n" +
+                        "这台机器上没有可写的外部存储（SD 卡 / 内置共享分区），" +
+                        "安装包只能放在应用私有目录里，" +
+                        "而 Android 4.4 及以下的系统安装器读不到那个位置。"
+                )
+                return@execute
+            }
 
             val all = candidates(release.url)
             // 上次清单走得通的那个前缀排到最前面
@@ -224,12 +267,10 @@ class UpdateManager(private val ctx: Context) {
 
             var lastError: String? = null
             for (url in ordered) {
-                val path = tryDownload(url, release, dir.file, onProgress)
+                val path = tryDownload(url, release, dir, onProgress)
                 if (path != null) {
                     goodPrefix = prefixOf(url, all)
                     Log.i(TAG, "下载完成 $path")
-                    // 落在应用私有目录时，安装器（另一个 uid）默认进不去 → 放开权限
-                    if (!dir.publiclyReadable) makeReadableForInstaller(File(path))
                     onDone(path)
                     return@execute
                 }
@@ -240,83 +281,59 @@ class UpdateManager(private val ctx: Context) {
     }
 
     /**
-     * 下载目录的候选与最终选择。
+     * 下载目录：三段，按「安装器能不能读到」排序 —— 不是按「本 App 能不能写」。
      *
-     * 顺序就是「装得上」的优先级：
+     * ⚠️ 这是实测踩出来的，两条都成立才算装得上：
      *
-     * 1. **外置存储的 Download**（`/sdcard/Download`）——
-     *    电视上唯一能让系统安装器读到的地方，也是历史路径。
-     * 2. **应用的外部私有目录**（`/sdcard/Android/data/<pkg>/files`）——
-     *    外置存储挂载了但 Download 写不进去时用（权限被 ROM 收走的机型）。
-     *    安装器仍然读得到，因为它在同一个分区上。
-     * 3. **应用内部目录**（`cacheDir`）—— 只在模拟器这种「外置存储整个没挂载」
-     *    的环境下兜底，用来验证下载链路本身通不通。
-     *    真机上走不到这条路；走到了也装不上，所以 [DownloadDir.publiclyReadable] = false。
+     * 1. **安装器是另一个 uid**（`com.android.packageinstaller`），它要自己
+     *    `openInputStream` 那个 APK。放在 `/data/data/<pkg>/` 里的文件它根本
+     *    进不去那个目录（0700），chmod 单个文件也没用。
+     * 2. 所以「换个 Uri」救不了「文件放错分区」—— 两者是**并列**条件。
+     *
+     * 实测（API 18 模拟器，外置存储未挂载 → 落到内部目录）：安装器弹
+     * `Parse error / There was a problem parsing the package`，
+     * 而文件字节数、签名全部正确 —— **从界面上完全看不出是权限问题**。
+     *
+     * - ① `getExternalFilesDir(DIRECTORY_DOWNLOADS)`：新系统首选。
+     *   API 19 起免任何权限；Android 11+ 虽然用 FUSE 隔离了
+     *   `/sdcard/Android/data/<pkg>/`，但那条路交给安装器的是 `content://`
+     *   （见 [apkUri]），字节由本 App 自己的 FileProvider 供，不需要路径权限。
+     * - ② `/sdcard/Download`：**老系统**的历史路径，只在 API < 29 上试。
+     *   4.3 真机（乐视 S50 Air）的在线更新一直这么走、验证过无数次；留着它，
+     *   某个 OEM 把 `getExternalFilesDir()` 弄坏时老电视还有退路。
+     *   分区存储那套规则从 API 29 才生效，targetSdk 升到 34 不影响 4.3 上的这条老路。
+     * - ③ `filesDir/update`：外置存储整个没挂载时的最后兜底，此时只能走
+     *   `content://`。用 filesDir 而不是 cacheDir —— cache 会被系统在低存储时
+     *   清掉，而这份 APK 要交给安装器，不能半路消失。
+     *
+     * 三段都失败才返回 null（[download] 会直接报「没有可写目录」）。
      */
-    private class DownloadDir(val file: File, val publiclyReadable: Boolean, val source: String)
-
-    private fun resolveDownloadDir(): DownloadDir? {
-        // ① /sdcard/Download
-        try {
-            // 用 Environment API 而不是硬编码 "/sdcard"：
-            // 4.3 上外置存储挂载点可能是 /mnt/sdcard 或 /storage/sdcard0
-            val ext = android.os.Environment.getExternalStorageDirectory()
-            if (ext != null && ext.canWrite()) {
-                val dir = File(ext, "Download")
-                if ((dir.exists() || dir.mkdirs()) && dir.canWrite()) {
-                    return DownloadDir(dir, true, "外置存储 Download")
-                }
-            }
-        } catch (ignored: Throwable) {
-        }
-
-        // ② /sdcard/Android/data/<pkg>/files
+    private fun resolveDownloadDir(): File? {
+        // ① 外部私有目录
         try {
             val ext = ctx.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)
-            if (ext != null && (ext.exists() || ext.mkdirs()) && ext.canWrite()) {
-                return DownloadDir(ext, true, "应用外部私有目录")
-            }
+            if (ext != null && (ext.exists() || ext.mkdirs()) && ext.canWrite()) return ext
         } catch (ignored: Throwable) {
         }
 
-        // ③ 应用内部目录（模拟器兜底）
-        //    用 filesDir 而不是 cacheDir：cache 会被系统在低存储时清掉，
-        //    而这份 APK 是要交给安装器的，不能半路消失。
+        // ② 老的 /sdcard/Download（分区存储时代写不进去，所以只对老系统试）
+        if (android.os.Build.VERSION.SDK_INT < 29) {
+            try {
+                @Suppress("DEPRECATION")
+                val root = android.os.Environment.getExternalStorageDirectory()
+                val dir = File(root, "Download")
+                if ((dir.exists() || dir.mkdirs()) && dir.canWrite()) return dir
+            } catch (ignored: Throwable) {
+            }
+        }
+
+        // ③ 内部私有目录：只有外置存储整个不可用时才落到这里（API 18 模拟器就是这种）
         try {
             val dir = File(ctx.filesDir, "update")
-            if ((dir.exists() || dir.mkdirs()) && dir.canWrite()) {
-                return DownloadDir(dir, false, "应用内部目录")
-            }
+            if ((dir.exists() || dir.mkdirs()) && dir.canWrite()) return dir
         } catch (ignored: Throwable) {
         }
         return null
-    }
-
-    /**
-     * 把内部目录里的 APK 放开给别的 uid 读。
-     *
-     * `/data/data/<pkg>/` 默认是 700（只有本 app 的 uid 进得去），
-     * 而系统安装器是另一个 uid —— 不放开就报「解析包时出现问题」。
-     *
-     * 4.3 上可以这样干：目录 chmod 0755、文件 chmod 0644，
-     * 安装器（uid system）就能顺着路径读到文件。
-     * 这也正是「内部目录兜底」能真正装上包的原因。
-     *
-     * ⚠️ 只对 [DownloadDir.publiclyReadable] = false 的情况调用；
-     *    外置存储上的文件本来就是全局可读的。
-     */
-    private fun makeReadableForInstaller(file: File) {
-        try {
-            file.setReadable(true, false)
-            // 目录要能被「穿过」，光设文件权限不够
-            file.parentFile?.setExecutable(true, false)
-            file.parentFile?.setReadable(true, false)
-            // 上层 filesDir 也要能穿过（/data/data/<pkg> 本身还是 700，
-            // 但 filesDir 可以单独放开）
-            file.parentFile?.parentFile?.setExecutable(true, false)
-            file.parentFile?.parentFile?.setReadable(true, false)
-        } catch (ignored: Throwable) {
-        }
     }
 
     /**
@@ -395,7 +412,6 @@ class UpdateManager(private val ctx: Context) {
                 val len = conn.contentLength.toLong()
                 if (len > 0) total = if (code == 206) downloaded + len else len
                 if (total > 0 && downloaded >= total) {
-                    target.setReadable(true, false)
                     return target.absolutePath
                 }
 
@@ -424,10 +440,15 @@ class UpdateManager(private val ctx: Context) {
                 // 长度已知就比字节数；长度未知时「没断过」即视为完整
                 val complete = if (total > 0) downloaded >= total else !broken
                 if (complete) {
-                    target.setReadable(true, false)
                     if (choice != null && host.isNotEmpty()) {
                         TlsStack.noteSuccess(ctx, host, choice!!.impl)
                     }
+                    // 系统安装器是**另一个 uid**，`FileOutputStream` 建出来的文件默认
+                    // 0600（实测 API 18 模拟器：`-rw------- u0_a46 u0_a46`）→ 安装器
+                    // 打不开，只报一句 "Parse error"，看起来像下载坏了。
+                    // 老版本靠 chmod 0644 解决；这里用公开 API 做同一件事，
+                    // 代价为零，留着能省掉一类「下载完成但装不上」的玄学故障。
+                    try { target.setReadable(true, false) } catch (ignored: Throwable) {}
                     return target.absolutePath
                 }
                 // 一个字节都没拿到，说明这个地址根本不通，别在这儿耗
@@ -520,20 +541,146 @@ class UpdateManager(private val ctx: Context) {
         ""
     }
 
-    /** 调起系统安装器装 APK。 */
+    /**
+     * 调起系统安装器装 APK。
+     *
+     * ## 两条 URI 路径，按 SDK_INT 分
+     *
+     * - **API 24+**：`file://` 一旦跨进程传给安装器，系统直接抛
+     *   `FileUriExposedException`（这是 targetSdk ≥ 24 的行为，跟设备版本无关）。
+     *   而且 Android 11+ 还把 `/sdcard/Android/data/<pkg>/` 用 FUSE 隔离了 ——
+     *   安装器（另一个 uid）顺着 `file://` 路径也读不到文件。
+     *   → 换成 FileProvider 的 `content://` + 临时读授权，两个问题一起解决。
+     * - **API 18~23**：`file://`。这条路在乐视 4.3 上**已经真机跑通过**，
+     *   而且 4.3 的安装器在 intent-filter 里只声明了 `scheme="file"` ——
+     *   给它 `content://` 会 `ActivityNotFoundException`（实测）。
+     *   代价：文件必须在共享存储上，否则安装器读不到（只回一句 `Parse error`）。
+     *   这种组合只在外置存储整个不可用时出现，[download] 会提前拦下并说明原因。
+     *
+     * ## 「安装未知应用」授权（API 26+）
+     *
+     * Android 8.0 起，**调用方**（也就是本 App）自己要拿到
+     * `REQUEST_INSTALL_PACKAGES` 并让用户在「安装未知应用」里放行。
+     * 没放行时 `startActivity` 不报错、安装器也不弹 —— 用户看到的就是
+     * 「下载完成」之后什么都没发生，非常难排查。所以先查一次，没放行就
+     * 把用户送到设置页（Toast 说明原因，因为设置页跳过去以后本 App 就不在前台了）。
+     *
+     * @return true = 已处理好（安装器已拉起，或已把用户送去授权页）
+     */
     fun install(apkPath: String): Boolean {
         return try {
             val file = File(apkPath)
-            if (!file.exists()) return false
+            if (!file.exists()) {
+                Log.e(TAG, "APK 不存在：$apkPath")
+                return false
+            }
+            if (needsUnknownSourcesGrant()) {
+                Log.w(TAG, "还没拿到「安装未知应用」授权，跳设置页")
+                openUnknownSourcesSettings()
+                return true
+            }
+            // 老系统 + 包在应用私有目录 → 安装器必然只回一句 Parse error（它读不到）。
+            // 这种组合只在外置存储整个不可用时才会出现，说清楚比让用户猜「包坏了」好。
+            if (android.os.Build.VERSION.SDK_INT < 24 && !isOnSharedStorage(file)) {
+                Log.e(TAG, "安装包在应用私有目录，老系统的安装器读不到：${file.absolutePath}")
+                Toast.makeText(ctx, OLD_SYSTEM_NO_STORAGE_HINT, Toast.LENGTH_LONG).show()
+                return false
+            }
+            val uri = apkUri(file)
+            Log.i(TAG, "调起安装器 ${uri.scheme}://… ${file.absolutePath}")
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(Uri.fromFile(file), "application/vnd.android.package-archive")
+                setDataAndType(uri, APK_MIME)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // content:// 必须显式授权，否则安装器 openInputStream 时 SecurityException
+                if (uri.scheme == "content") addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             ctx.startActivity(intent)
             true
         } catch (e: Throwable) {
             Log.e(TAG, "调起安装器失败", e)
             false
+        }
+    }
+
+    /**
+     * 把本地 APK 包成能跨进程递出去的 Uri。
+     *
+     * ⚠️ authorities 必须和 AndroidManifest 里 FileProvider 的 `${applicationId}.fileprovider`
+     *    完全一致，路径白名单（res/xml/file_paths.xml）必须覆盖 [resolveDownloadDir]
+     *    返回的两个目录。对不上时 `getUriForFile` 抛
+     *    `IllegalArgumentException: Failed to find configured root that contains ...`，
+     *    只在真机上才炸。
+     */
+    private fun apkUri(file: File): Uri {
+        // API < 24：**只能** `file://`。乐视 4.3 上这条路真机验证过无数次，
+        // 而且 4.3 的 `PackageInstallerActivity` 在 intent-filter 里只声明了
+        // `scheme="file"` —— 给它 `content://` 会直接
+        // `ActivityNotFoundException: No Activity found to handle Intent{… dat=content://…}`，
+        // 安装器压根不会出现（实测，哪怕 Uri 授权标志都带上）。
+        // 代价是：文件必须落在共享存储上（见 [isOnSharedStorage] 与 [install] 的检查）。
+        if (android.os.Build.VERSION.SDK_INT < 24) return Uri.fromFile(file)
+        return androidx.core.content.FileProvider.getUriForFile(
+            ctx,
+            "${ctx.packageName}.fileprovider",
+            file
+        )
+    }
+
+    /**
+     * 文件是否在「另一个进程顺着路径就能读」的共享存储上。
+     *
+     * 只用来判断 4.3 / 4.4 上 `file://` 能不能把包交给安装器，**不是**权限判断。
+     *
+     * 为什么需要这个判断：安装器是另一个 uid，跟着 `file://` 去
+     * `/data/data/<pkg>/files/…` 是进不去的（目录 0700），它只会回一句
+     * `Parse error when parsing manifest` —— 界面上看不出是权限问题。
+     * 而 4.3 又不接 `content://`（见 [apkUri]），所以在那种机器上唯一的出路
+     * 就是「别把 APK 放在内部目录」，也就是在 [download] 阶段就停下来说明原因。
+     *
+     * 认 `/storage/`（`emulated/0`、`sdcard0` 两种挂法都在这儿）和
+     * `/sdcard/`（符号链接）两个前缀；内部私有目录 `/data/data/…` 与
+     * `/data/user/0/…` 都不匹配。
+     */
+    private fun isOnSharedStorage(file: File): Boolean {
+        val path = try {
+            file.canonicalPath
+        } catch (ignored: Throwable) {
+            file.absolutePath
+        }
+        if (path.startsWith("/storage/") || path.startsWith("/sdcard/")) return true
+        return try {
+            @Suppress("DEPRECATION")
+            val root = android.os.Environment.getExternalStorageDirectory().absolutePath
+            path.startsWith("$root/")
+        } catch (ignored: Throwable) {
+            false
+        }
+    }
+
+    /** API 26+ 且用户还没放行「安装未知应用」时返回 true。查不动一律当已放行（让它试着装）。 */
+    private fun needsUnknownSourcesGrant(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 26) return false
+        return try {
+            !ctx.packageManager.canRequestPackageInstalls()
+        } catch (e: Throwable) {
+            Log.w(TAG, "查 canRequestPackageInstalls 失败，当作已授权", e)
+            false
+        }
+    }
+
+    private fun openUnknownSourcesSettings() {
+        try {
+            Toast.makeText(ctx, UNKNOWN_SOURCES_HINT, Toast.LENGTH_LONG).show()
+        } catch (ignored: Throwable) {
+        }
+        try {
+            val intent = Intent(
+                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:${ctx.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(TAG, "跳转「安装未知应用」设置页失败", e)
         }
     }
 

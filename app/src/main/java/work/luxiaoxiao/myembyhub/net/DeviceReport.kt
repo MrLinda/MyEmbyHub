@@ -765,6 +765,7 @@ object DeviceReport {
         firstFrame = PlaybackSnapshot.firstFrame,
         errorCode = PlaybackSnapshot.errorCode,
         errorMessage = PlaybackSnapshot.errorMessage,
+        lastBuffering = PlaybackSnapshot.lastBuffering,
         note = if (PlaybackSnapshot.lastItemTitle.isEmpty()) "这次开机还没播过东西" else ""
     )
 
@@ -1133,7 +1134,8 @@ object DeviceReport {
         val lastItemTitle: String, val lastItemId: String, val container: String,
         val videoCodec: String, val audioCodec: String, val width: Int, val height: Int,
         val bitrateKbps: Int, val decoderName: String, val firstFrame: Boolean,
-        val errorCode: String, val errorMessage: String, val note: String
+        val errorCode: String, val errorMessage: String, val note: String,
+        val lastBuffering: PlaybackSnapshot.BufferingSample?
     ) {
         fun toJson() = JSONObject().apply {
             put("lastItemTitle", lastItemTitle); put("lastItemId", lastItemId)
@@ -1142,6 +1144,14 @@ object DeviceReport {
             put("bitrateKbps", bitrateKbps); put("decoderName", decoderName)
             put("firstFrame", firstFrame); put("errorCode", errorCode)
             put("errorMessage", errorMessage); put("note", note)
+            lastBuffering?.let { sample ->
+                put("lastBuffering", JSONObject().apply {
+                    put("afterFirstFrame", sample.afterFirstFrame)
+                    put("waitMs", sample.waitMs)
+                    put("downloadedBytes", sample.downloadedBytes)
+                    put("bufferedMediaMs", sample.bufferedMediaMs)
+                })
+            }
         }
     }
 

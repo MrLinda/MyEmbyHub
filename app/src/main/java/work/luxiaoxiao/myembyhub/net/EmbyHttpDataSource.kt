@@ -2,16 +2,20 @@ package work.luxiaoxiao.myembyhub.net
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
+import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.upstream.DataSource
 import com.google.android.exoplayer2.upstream.DataSpec
+import com.google.android.exoplayer2.upstream.HttpUtil
 import com.google.android.exoplayer2.upstream.TransferListener
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
+import java.io.EOFException
 import java.io.IOException
-import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.LinkedHashMap
 import javax.net.ssl.SSLSocket
 
@@ -32,8 +36,8 @@ import javax.net.ssl.SSLSocket
  *    ExoPlayer 不会替你跟重定向，得自己读 `Location` 头、重建连接再发一次。
  * 2. **必须能拿到总长度**。`v10` 对 Range 请求返回 `206` +
  *    `Content-Range: bytes 0-2047/294813105`，但 `Content-Length` 只是
- *    **本次 range 的长度**（2048）。若原样交给 ExoPlayer，媒体总长会算错、
- *    时长/进度条全乱。这里把 `Content-Range` 里的总长回填给 ExoPlayer。
+ *    **本次 range 的长度**（2048）。`open()` 返回本次可读长度，
+ *    响应头保留 `Content-Range` 里的媒体总长。
  * 3. **Token 用 `X-Emby-Token` 头**即可，跨 `v10` 重定向后依然有效
  *    （服务端认同一个 token）。
  *
@@ -59,9 +63,13 @@ class EmbyHttpDataSource(
         private const val TAG = "TvCheck"
         /** 最多跟几跳重定向。 */
         private const val MAX_REDIRECTS = 5
+        private const val REDIRECT_TTL_MS = 15_000L
         private const val CONNECT_TIMEOUT_MS = 10000
+        private const val INITIAL_EMBY_RESPONSE_TIMEOUT_MS = 15000
         private const val READ_TIMEOUT_MS = 30000
         private const val MAX_HEADER_BYTES = 65536
+        // MKV/MP4 解封装会频繁小读，复用一块缓冲减少 socket/TLS 调用。
+        private const val STREAM_BUFFER_BYTES = 64 * 1024
 
         /**
          * 空闲连接池最多留几条。
@@ -149,13 +157,13 @@ class EmbyHttpDataSource(
     }
 
     private var socket: Socket? = null
-    private var body: InputStream? = null
+    private var body: BufferedInputStream? = null
     private var responseHeaders: Map<String, List<String>>? = null
     private var currentUri: Uri? = null
     /** 服务器忽略了 Range（回了 200 而不是 206）时，需要自己跳过的字节数。 */
     private var skipBytes: Long = 0
-    /** 本次连接实际可读的总长度。 */
-    private var contentLength: Long = 0
+    /** 本次 DataSpec 还需要交给调用方的字节数；-1 表示长度未知。 */
+    private var bytesToRead: Long = C.LENGTH_UNSET.toLong()
     /** 最近一次 open() 的结果摘要，给探针写日志用。 */
     var lastOpenSummary: String = ""
         private set
@@ -163,6 +171,16 @@ class EmbyHttpDataSource(
     private var currentPoolKey: String? = null
     /** 本次响应体还剩多少字节没读；-1 表示长度未知。读完才敢把连接还回池子。 */
     private var bytesRemaining: Long = -1
+    private var recentRedirect: RecentRedirect? = null
+    private var rejectedRedirectOriginal: String? = null
+    private var attemptedInitialEmbyRequest = false
+
+    private data class RecentRedirect(
+        val original: String,
+        val target: String,
+        val requestHeaders: Map<String, String>,
+        val openedAt: Long
+    )
 
     // ==================== DataSource 接口 ====================
 
@@ -177,83 +195,97 @@ class EmbyHttpDataSource(
     /**
      * 打开连接。
      *
-     * @return 可读的总字节数；长度未知时返回 [com.google.android.exoplayer2.upstream.C.LENGTH_UNSET]
+     * @return 本次请求从指定偏移可读的字节数；长度未知时返回 [C.LENGTH_UNSET]。
      */
     override fun open(dataSpec: DataSpec): Long {
         close()
 
-        var url = dataSpec.uri.toString()
-        var redirects = 0
+        val original = dataSpec.uri.toString()
+        val reused = reuseRedirect(original, dataSpec)
+        if (reused == null) recentRedirect = null
+        val (url, resp) = reused ?: followRedirects(original, dataSpec)
+        val code = resp.code
 
-        while (true) {
-            val resp = request(url, dataSpec.position, dataSpec.length, dataSpec.httpRequestHeaders)
-            val code = resp.code
-
-            // 302 / 301 / 307 / 308：换地址重来
-            if (code in 300..399) {
-                val loc = resp.header("location")
-                    ?: throw IOException("HTTP $code 但响应里没有 Location 头  ← $url")
-                if (++redirects > MAX_REDIRECTS) throw IOException("重定向超过 $MAX_REDIRECTS 次：$loc")
-                val next = resolve(url, loc)
-                Log.i(TAG, "GET $url → $code, Location=$next")
-                resp.closeQuietly()
-                url = next
-                continue
+        if (code != 200 && code != 206) {
+            // 带上响应体片段和出错 URL，下次排查不用猜
+            val snippet = try {
+                val buf = ByteArray(256)
+                val n = resp.body.read(buf)
+                if (n > 0) String(buf, 0, n, Charsets.ISO_8859_1).replace('\n', ' ').trim() else ""
+            } catch (ignored: Throwable) {
+                ""
             }
-
-            if (code != 200 && code != 206) {
-                // 带上响应体片段和出错 URL，下次排查不用猜
-                val snippet = try {
-                    val buf = ByteArray(256)
-                    val n = resp.body.read(buf)
-                    if (n > 0) String(buf, 0, n, Charsets.ISO_8859_1).replace('\n', ' ').trim() else ""
-                } catch (ignored: Throwable) {
-                    ""
-                }
-                resp.closeQuietly()
-                throw IOException("HTTP $code ${resp.statusLine}  ← $url  ${snippet.take(160)}")
-            }
-
-            socket = resp.socket
-            body = resp.body
-            responseHeaders = resp.headers
-            currentUri = Uri.parse(url)
-            currentPoolKey = resp.poolKey
-            // 本次响应体还有多少字节没读 —— 读干净了才敢把连接还回池子
-            bytesRemaining = resp.header("content-length")?.toLongOrNull() ?: -1L
-
-            // 206：从 Content-Range 取总长；Content-Length 只是本次 range 的长度
-            var total = -1L
-            if (code == 206) {
-                val cr = resp.header("content-range")
-                total = parseTotalFromContentRange(cr)
-                if (total > 0) {
-                    // 把 Content-Length 改成总长，ExoPlayer 才知道真实时长
-                    responseHeaders = LinkedHashMap(resp.headers).apply {
-                        val old = get("Content-Length")
-                        remove("Content-Length")
-                        put("Content-Length", listOf(total.toString()))
-                        if (old != null) put("Content-Range-Response-Length", old)
-                    }
-                }
-            } else {
-                // 200：服务器忽略了 Range，若请求位置不在 0，得自己跳过
-                if (dataSpec.position > 0) skipBytes = dataSpec.position
-                val cl = resp.header("content-length")?.toLongOrNull()
-                total = cl ?: -1L
-            }
-
-            contentLength = if (total > 0) total else -1L
-            lastOpenSummary = "HTTP $code, 总长=$contentLength, Content-Range=${resp.header("content-range")}, " +
-                "请求position=${dataSpec.position}/length=${dataSpec.length}, 解码=${(resp.socket as? javax.net.ssl.SSLSocket)?.session?.protocol}" +
-                "/${(resp.socket as? javax.net.ssl.SSLSocket)?.session?.cipherSuite}"
-            sharedLog?.append(lastOpenSummary)?.append('\n')
-            Log.i(TAG, "open $url → $lastOpenSummary")
-            return contentLength
+            resp.closeQuietly()
+            throw IOException("HTTP $code ${resp.statusLine}  ← $url  ${snippet.take(160)}")
         }
+
+        socket = resp.socket
+        body = resp.body
+        responseHeaders = resp.headers
+        currentUri = Uri.parse(url)
+        currentPoolKey = resp.poolKey
+        val contentRange = resp.header("content-range")
+        bytesRemaining = HttpUtil.getContentLength(resp.header("content-length"), contentRange)
+        // 200 表示服务器忽略 Range。跳过的部分不计入交给 ExoPlayer 的长度。
+        if (code == 200) skipBytes = dataSpec.position
+        if (bytesRemaining >= 0 && skipBytes > bytesRemaining) {
+            close()
+            throw EOFException("请求位置 ${dataSpec.position} 超出响应长度")
+        }
+        val available = if (bytesRemaining >= 0) bytesRemaining - skipBytes else bytesRemaining
+        bytesToRead = when {
+            dataSpec.length < 0 -> available
+            available < 0 -> dataSpec.length
+            else -> minOf(available, dataSpec.length)
+        }
+
+        // 206：从 Content-Range 取总长；Content-Length 只是本次 range 的长度
+        val total = if (code == 206) parseTotalFromContentRange(contentRange) else bytesRemaining
+        if (code == 206 && total > 0) {
+            responseHeaders = LinkedHashMap(resp.headers).apply {
+                val old = get("Content-Length")
+                put("Content-Length", listOf(total.toString()))
+                if (old != null) put("Content-Range-Response-Length", old)
+            }
+        }
+        if (reused == null && code == 206 && url != original && original != rejectedRedirectOriginal) {
+            recentRedirect = RecentRedirect(original, url, dataSpec.httpRequestHeaders, SystemClock.elapsedRealtime())
+        }
+
+        lastOpenSummary = "HTTP $code, 总长=$total, 本次可读=$bytesToRead, Content-Range=$contentRange, " +
+            "请求position=${dataSpec.position}/length=${dataSpec.length}, 解码=${(resp.socket as? javax.net.ssl.SSLSocket)?.session?.protocol}" +
+            "/${(resp.socket as? javax.net.ssl.SSLSocket)?.session?.cipherSuite}"
+        sharedLog?.append(lastOpenSummary)?.append('\n')
+        Log.i(TAG, "open $url → $lastOpenSummary")
+        return bytesToRead
+    }
+
+    /** 从刚打开的响应头部探测容器，保留原来的读取位置和长度。 */
+    internal fun peekPrefix(length: Int): ByteArray {
+        val stream = body ?: throw IOException("连接未打开")
+        val count = if (bytesToRead < 0) length else minOf(length.toLong(), bytesToRead).toInt()
+        require(skipBytes == 0L && count <= STREAM_BUFFER_BYTES)
+        val prefix = ByteArray(count)
+        stream.mark(count)
+        val started = SystemClock.elapsedRealtime()
+        var read = 0
+        try {
+            while (read < count) {
+                val n = stream.read(prefix, read, count - read)
+                if (n < 0) break
+                read += n
+            }
+        } finally {
+            stream.reset()
+            val elapsed = SystemClock.elapsedRealtime() - started
+            if (elapsed >= 1000L) Log.i(TAG, "streamPrefix bytes=$read elapsed=${elapsed}ms")
+        }
+        return if (read == count) prefix else prefix.copyOf(read)
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        if (bytesToRead == 0L) return C.RESULT_END_OF_INPUT
         val stream = body ?: throw IOException("连接未打开")
         if (skipBytes > 0) {
             var remain = skipBytes
@@ -272,10 +304,11 @@ class EmbyHttpDataSource(
             if (bytesRemaining > 0) bytesRemaining = (bytesRemaining - skipBytes).coerceAtLeast(0)
             skipBytes = 0
         }
-        val n = stream.read(buffer, offset, length)
-        if (n > 0 && bytesRemaining > 0) {
-            bytesRemaining = (bytesRemaining - n).coerceAtLeast(0)
-        }
+        val requested = if (bytesToRead < 0) length else minOf(length.toLong(), bytesToRead).toInt()
+        val n = stream.read(buffer, offset, requested)
+        if (n == C.RESULT_END_OF_INPUT && bytesToRead > 0) throw EOFException("媒体响应提前结束")
+        if (n > 0 && bytesRemaining >= 0) bytesRemaining -= n
+        if (n > 0 && bytesToRead >= 0) bytesToRead -= n
         // 网速显示用：把真实读到的字节累加进全局计数（跳过 seek 的字节不算下载）
         if (n > 0) totalBytesRead.addAndGet(n.toLong())
         return n
@@ -311,16 +344,60 @@ class EmbyHttpDataSource(
         currentPoolKey = null
         bytesRemaining = -1
         skipBytes = 0
-        contentLength = 0
+        bytesToRead = C.LENGTH_UNSET.toLong()
     }
 
     // ==================== 内部实现 ====================
+
+    private fun followRedirects(original: String, spec: DataSpec): Pair<String, HttpResponse> {
+        var url = original
+        var redirects = 0
+        while (true) {
+            val hop = if (redirects == 0) "origin" else "redirect"
+            val resp = request(url, spec.position, spec.length, spec.httpRequestHeaders, hop)
+            if (resp.code !in 300..399) return url to resp
+            try {
+                val location = resp.header("location")
+                    ?: throw IOException("HTTP ${resp.code} 但响应里没有 Location 头  ← $url")
+                if (++redirects > MAX_REDIRECTS) throw IOException("重定向超过 $MAX_REDIRECTS 次：$location")
+                val next = resolve(url, location)
+                Log.i(TAG, "GET $url → ${resp.code}, Location=$next")
+                url = next
+            } finally {
+                resp.closeQuietly()
+            }
+        }
+    }
+
+    /** MP4 可连续读开头、文件尾部索引和续播位置。短时间内可直接请求同一条取流地址。 */
+    private fun reuseRedirect(original: String, spec: DataSpec): Pair<String, HttpResponse>? {
+        if (spec.position == 0L) return null
+        val cached = recentRedirect ?: return null
+        if (cached.original != original || cached.requestHeaders != spec.httpRequestHeaders ||
+            SystemClock.elapsedRealtime() - cached.openedAt >= REDIRECT_TTL_MS
+        ) return null
+        val resp = try {
+            request(cached.target, spec.position, spec.length, spec.httpRequestHeaders, "cached")
+        } catch (_: IOException) {
+            null
+        }
+        if (resp?.code == 206 && resp.header("content-range")
+                ?.startsWith("bytes ${spec.position}-", ignoreCase = true) == true
+        ) {
+            Log.i(TAG, "复用取流地址 position=${spec.position}")
+            return cached.target to resp
+        }
+        resp?.closeQuietly()
+        rejectedRedirectOriginal = original
+        Log.i(TAG, "取流地址不可复用，重新请求服务端")
+        return null
+    }
 
     private class HttpResponse(
         val code: Int,
         val statusLine: String,
         val headers: Map<String, List<String>>,
-        val body: InputStream,
+        val body: BufferedInputStream,
         val socket: Socket,
         /** 这条 socket 对应的池子 key；null 表示不可复用。 */
         val poolKey: String? = null
@@ -352,18 +429,57 @@ class EmbyHttpDataSource(
         urlStr: String,
         position: Long,
         length: Long,
-        extraHeaders: Map<String, String>?
+        extraHeaders: Map<String, String>?,
+        hop: String
     ): HttpResponse {
         val u = UrlKit.parse(urlStr)
+        val initialEmbyRequest = !attemptedInitialEmbyRequest && hop == "origin" && position == 0L &&
+            length == C.LENGTH_UNSET.toLong() && u.path.contains("/Videos/", ignoreCase = true) &&
+            u.path.endsWith("/stream", ignoreCase = true)
+        if (initialEmbyRequest) attemptedInitialEmbyRequest = true
         // 复用的连接可能已经被对端关掉了（服务端 keepalive 超时、NAT 老化）。
         // 这种情况下第一次写/读会抛异常，换条新连接重试一次即可 —— 不值得让用户看到报错。
         var reused = false
         try {
-            return requestOnce(u, position, length, extraHeaders, allowReuse = true) { reused = it }
+            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = true, initialEmbyRequest = initialEmbyRequest) {
+                reused = it
+            }
+        } catch (e: InitialResponseTimeout) {
+            // 只提前重试首次 Emby 请求的首包超时，重试沿用正常超时给慢服务器留足时间。
+            Log.i(TAG, "首个 Emby 请求没有返回响应，换新连接重试")
+            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = false) {}
         } catch (e: IOException) {
             if (!reused) throw e
             Log.i(TAG, "复用的连接已失效，换新连接重试：${e.message}")
-            return requestOnce(u, position, length, extraHeaders, allowReuse = false) {}
+            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = false) {}
+        }
+    }
+
+    private class InitialResponseTimeout(cause: SocketTimeoutException) : IOException(cause)
+
+    /** HTTP 诊断只记录阶段、耗时和状态，避免把下载签名或凭据写进诊断行。 */
+    private class RequestTiming(private val hop: String, private val position: Long) {
+        private val started = SystemClock.elapsedRealtime()
+        private val stages = ArrayList<String>(7)
+        private var failedStage: String? = null
+
+        inline fun <T> measure(stage: String, block: () -> T): T {
+            val start = SystemClock.elapsedRealtime()
+            try {
+                return block()
+            } catch (e: Exception) {
+                if (failedStage == null) failedStage = stage
+                throw e
+            } finally {
+                stages.add("$stage=${SystemClock.elapsedRealtime() - start}ms")
+            }
+        }
+
+        fun finish(reused: Boolean, status: String, failure: Boolean = false) {
+            val total = SystemClock.elapsedRealtime() - started
+            if (!failure && position != 0L && total < 1000L) return
+            val stage = failedStage?.let { " failedAt=$it" }.orEmpty()
+            Log.i(TAG, "streamTiming hop=$hop position=$position reused=$reused $status$stage total=${total}ms ${stages.joinToString(" ")}")
         }
     }
 
@@ -372,7 +488,9 @@ class EmbyHttpDataSource(
         position: Long,
         length: Long,
         extraHeaders: Map<String, String>?,
+        hop: String,
         allowReuse: Boolean,
+        initialEmbyRequest: Boolean = false,
         onReuse: (Boolean) -> Unit
     ): HttpResponse {
         val host = u.host
@@ -383,10 +501,12 @@ class EmbyHttpDataSource(
 
         val idle = if (allowReuse) takeIdle(key) else null
         onReuse(idle != null)
-        val s: Socket = idle ?: openSocket(u, host, port)
-        s.soTimeout = READ_TIMEOUT_MS
+        val timing = RequestTiming(hop, position)
+        var socket: Socket? = idle
 
         try {
+            val s = idle ?: openSocket(u, timing).also { socket = it }
+            s.soTimeout = READ_TIMEOUT_MS
             val sb = StringBuilder()
             sb.append("GET ").append(path).append(if (query != null) "?$query" else "").append(" HTTP/1.1\r\n")
             // ⚠️ Host 头**不能带默认端口**。
@@ -414,41 +534,54 @@ class EmbyHttpDataSource(
             extraHeaders?.forEach { (k, v) -> sb.append(k).append(": ").append(v).append("\r\n") }
             sb.append("\r\n")
 
-            val out = s.getOutputStream()
-            out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
-            out.flush()
+            timing.measure("write") {
+                val out = s.getOutputStream()
+                out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+                out.flush()
+            }
 
-            return readResponse(s, key)
+            val response = readResponse(s, key, timing, initialEmbyRequest)
+            timing.finish(idle != null, "http=${response.code}")
+            return response
         } catch (e: Throwable) {
             // 失败的连接绝不能还池（残留字节会污染下一条响应），直接关掉
-            try { s.close() } catch (ignored: Throwable) {}
+            try { socket?.close() } catch (ignored: Throwable) {}
+            timing.finish(idle != null, "error=${e.javaClass.simpleName}", failure = true)
             throw e
         }
     }
 
     /** 建立（TLS）连接。http 走明文，https 走内置锚点验签 + 按域名记录选栈。 */
-    private fun openSocket(u: UrlKit.Parts, host: String, port: Int): Socket {
+    private fun openSocket(u: UrlKit.Parts, timing: RequestTiming): Socket {
+        val host = u.host
+        val port = u.port
+        val address = timing.measure("dns") { InetSocketAddress(host, port) }
         if (u.scheme == "https") {
             // 取流会 302 到 v10./v11. 这类分流节点，**每个域名都是一次独立判定**。
             // 记录（TlsHostMemory）就是为了让每个节点最多只付一次失败握手。
-            val first = TlsStack.chooseFor(ctx, TrustMode.BUNDLED, host)
+            val first = timing.measure("tlsSetup") { TlsStack.chooseFor(ctx, TrustMode.BUNDLED, host) }
                 ?: throw IOException("无法构造 TLS socket factory")
             try {
-                return tlsConnect(first.factory, host, port).also {
+                return tlsConnect(first.factory, address, host, timing).also {
                     TlsStack.noteSuccess(ctx, host, first.impl)
                 }
             } catch (e: Throwable) {
                 if (!TlsStack.isHandshakeFailure(e)) throw e
                 Log.w(TAG, "$host 用 ${first.impl} 握手失败，换栈重试: ${e.message}")
                 val second = TlsStack.escalate(ctx, TrustMode.BUNDLED, first.impl) ?: throw e
-                return tlsConnect(second.factory, host, port).also {
+                return tlsConnect(second.factory, address, host, timing).also {
                     TlsStack.noteSuccess(ctx, host, second.impl)
                 }
             }
         }
         val plain = Socket()
-        plain.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-        return plain
+        try {
+            timing.measure("tcp") { plain.connect(address, CONNECT_TIMEOUT_MS) }
+            return plain
+        } catch (e: Exception) {
+            try { plain.close() } catch (ignored: IOException) {}
+            throw e
+        }
     }
 
     /**
@@ -459,41 +592,60 @@ class EmbyHttpDataSource(
      */
     private fun tlsConnect(
         factory: javax.net.ssl.SSLSocketFactory,
+        address: InetSocketAddress,
         host: String,
-        port: Int
+        timing: RequestTiming
     ): Socket {
         val ssl = factory.createSocket() as SSLSocket
         // ⚠️⚠️ 必须显式设 SNI！
         //    无参 createSocket() 建出来的 socket 不带 SNI，
         //    挂在 Cloudflare 前面的服务器会**直接拒握手**。
         //    （业务接口走 HttpsURLConnection，libcore 内部会设，所以只有取流挂）
-        TlsStack.applyServerName(ssl, host)
-        ssl.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-        ssl.startHandshake()
-        return ssl
+        try {
+            TlsStack.applyServerName(ssl, host)
+            timing.measure("tcp") { ssl.connect(address, CONNECT_TIMEOUT_MS) }
+            timing.measure("tls") { ssl.startHandshake() }
+            return ssl
+        } catch (e: Exception) {
+            try { ssl.close() } catch (ignored: IOException) {}
+            throw e
+        }
     }
 
     /** 读响应头（状态行 + 头字段），body 直接接着 socket 流读。 */
-    private fun readResponse(s: Socket, poolKey: String?): HttpResponse {
+    private fun readResponse(
+        s: Socket, poolKey: String?, timing: RequestTiming, initialEmbyRequest: Boolean
+    ): HttpResponse {
         // ⚠️ 逐字节读到 "\r\n\r\n" 为止 —— 此时 socket 流的位置**正好在 body 开头**，
         //    所以**不需要** unread 任何东西。
         //    （2026-11-03 真机踩过：把头结束符 "\r\n\r\n" 当成 body 前 4 字节 unread 回去，
         //      ExoPlayer 读到的第一个字节是 0D 0A 而不是 'ftyp'，
         //      十五个 extractor 全部拒绝 → PARSING_CONTAINER_UNSUPPORTED。）
-        val raw = BufferedInputStream(s.getInputStream(), 8192)
+        val raw = BufferedInputStream(s.getInputStream(), STREAM_BUFFER_BYTES)
         val head = ByteArrayOutputStream()
         val term = byteArrayOf(13, 10, 13, 10)
         var matched = 0
-        while (head.size() < MAX_HEADER_BYTES) {
-            val b = raw.read()
-            if (b < 0) break
-            head.write(b)
-            matched = when {
-                (b and 0xFF) == (term[matched].toInt() and 0xFF) -> matched + 1
-                (b and 0xFF) == (term[0].toInt() and 0xFF) -> 1
-                else -> 0
+        if (initialEmbyRequest) s.soTimeout = INITIAL_EMBY_RESPONSE_TIMEOUT_MS
+        var b = timing.measure("firstByte") {
+            try {
+                raw.read()
+            } catch (e: SocketTimeoutException) {
+                if (initialEmbyRequest) throw InitialResponseTimeout(e)
+                throw e
             }
-            if (matched == 4) break
+        }
+        if (initialEmbyRequest) s.soTimeout = READ_TIMEOUT_MS
+        timing.measure("headers") {
+            while (b >= 0 && head.size() < MAX_HEADER_BYTES) {
+                head.write(b)
+                matched = when {
+                    (b and 0xFF) == (term[matched].toInt() and 0xFF) -> matched + 1
+                    (b and 0xFF) == (term[0].toInt() and 0xFF) -> 1
+                    else -> 0
+                }
+                if (matched == 4 || head.size() >= MAX_HEADER_BYTES) break
+                b = raw.read()
+            }
         }
         if (matched != 4) {
             try { s.close() } catch (ignored: Throwable) {}
@@ -516,7 +668,11 @@ class EmbyHttpDataSource(
             headers.getOrPut(k) { ArrayList() }.add(v)
         }
 
-        return HttpResponse(code, statusLine, headers, raw, s, poolKey)
+        val connection = headers.entries.firstOrNull { it.key.equals("Connection", ignoreCase = true) }
+            ?.value?.joinToString(",")?.split(',')?.map { it.trim() }.orEmpty()
+        val keepAlive = connection.none { it.equals("close", ignoreCase = true) } &&
+            (statusLine.startsWith("HTTP/1.1 ") || connection.any { it.equals("keep-alive", ignoreCase = true) })
+        return HttpResponse(code, statusLine, headers, raw, s, poolKey.takeIf { keepAlive })
     }
 
     /** 从 `bytes 0-2047/294813105` 里解析总长。 */

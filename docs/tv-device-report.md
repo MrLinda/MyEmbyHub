@@ -368,6 +368,11 @@ UI 上只显示「下载失败」，**完全看不出是权限问题**（这是�
 - `targetSdk` 再低也一样强制，API 18 是分水岭。
 - 下载完成后还要 `File.setReadable(true, false)`，否则**系统安装器**（另一个 uid）
   读不到 `/sdcard` 里的 APK。
+> **现状（2026-11-20 起）**：在线更新不再写 `/sdcard/Download/`，改下到应用外部私有目录
+> （`getExternalFilesDir(DIRECTORY_DOWNLOADS)` = `Android/data/<pkg>/files/Download`）。
+> 那条路径不需要任何存储权限，`WRITE_EXTERNAL_STORAGE` 现在带 `maxSdkVersion="32"` 留着回退。
+> `setReadable(true, false)` 仍保留 —— 安装器还是另一个 uid。
+> 但**安装器读得到私有外部目录、读不到应用内部目录**，后者只回一句 `Parse error`（已实测）。
 
 #### 5.9.2 服务端和电视网络都没问题（同一次排查的排除项）
 

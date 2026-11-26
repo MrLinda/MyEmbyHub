@@ -209,9 +209,31 @@ tag 已经存在说明这个包发过了，脚本直接报错（重发请先删�
 由此带来的使用体验问题，得认：
 
 - **下载成功但用户没按「安装」**，下次检查更新还是提示有新版 —— 这**不是 bug**；
-- 系统安装器装完会把源 APK 从 `/sdcard/Download/` **删掉**（logcat 里 `delete done`），
+- 系统安装器**有可能**把源 APK 删掉（`/sdcard/Download/` 上会，logcat 里 `delete done`；下到应用私有目录时实测留着），
   「下载的文件凭空消失」是正常现象；
 - 装完第一次启动会慢（new dex 要 dexopt），别当成卡死。
+### 8.1 一个包同时伺候 4.3 和最新电视
+
+`minSdk 18` + `targetSdk 34`，没有为老系统出单独变体，差异全在运行时按 `SDK_INT` 分岔
+（`UpdateManager` 里就三处）：
+
+| 环节 | API 18~23 | API 24+ |
+|---|---|---|
+| 安装包 Uri | `Uri.fromFile()` | `FileProvider.getUriForFile()` |
+| 未知来源授权 | 装机即授 | API 26+ 先查 `canRequestPackageInstalls()`，没授权就跳 `ACTION_MANAGE_UNKNOWN_APP_SOURCES` |
+| 下载目录 | `getExternalFilesDir(DIRECTORY_DOWNLOADS)`，不可用时退回 `filesDir/update` 并直接报错 | 同左 |
+
+两条实测教训（都是 2026-11-20 在 API 18 模拟器上撞出来的）：
+
+- **4.3 的安装器不接 `content://`**：`PackageInstallerActivity` 的 intent-filter 只声明
+  `scheme="file"`，给它 content Uri 直接
+  `ActivityNotFoundException: No Activity found to handle Intent { ... dat=content://... }`。
+  所以老系统这一支不能为了「统一」改成 FileProvider。
+- **老系统上安装器是另一个 uid，进不去 `/data/data/<pkg>/`**（目录 0700）。
+  同一个 APK 放那儿，安装器只回 `Parse error when parsing manifest`，界面写
+  「There was a problem parsing the package」—— 看着像包坏了，其实是权限。
+  这也是「下载必须在共享存储上」的真正原因；`file.setReadable(true, false)` 只能救文件权限，
+  救不了目录。
 
 ---
 
@@ -222,8 +244,8 @@ tag 已经存在说明这个包发过了，脚本直接报错（重发请先删�
 | 「检查更新失败」+ 所有地址 | `adb logcat -s Update` —— 每个候选的失败原因都打了 `W/Update` |
 | **「怎么一直提示有更新」** | 先比两个数字：`adb shell dumpsys package work.luxiaoxiao.myembyhub \| findstr versionCode` 和 `dist/version.json` 里的 `versionCode`。见下面第 9.1 节 |
 | 下载到一半失败 | 镜像限速会返回半截内容；`tryDownloadOnce` 里有 `Range` 续传（最多 6 轮），日志里能看到「第 N 轮，已有 X 字节」。一直续不上说明这个地址真不通，换下一个 |
-| 「下载失败：无写权限」 | `WRITE_EXTERNAL_STORAGE` 没声明，或 `/sdcard` 没挂载。`resolveDownloadDir()` 会依次试 `/sdcard/Download` → 应用外部私有目录 → 应用内部目录，日志里 `下载目录 …（来源）` 会说明落在哪 |
-| 模拟器上更新装不上 | 模拟器 `/storage/sdcard` 是只读的（`dr-xr-xr-x`），下载会落到 `files/update`。这个目录通过 `makeReadableForInstaller()` 放开成 0755/0644 后**系统安装器确实能装上**（已验证：`App installed.`） |
+| 「下载失败：没有可写目录」 | 外置存储没挂载，应用外部私有目录也建不出来。`resolveDownloadDir()` 依次试 ① `getExternalFilesDir(DIRECTORY_DOWNLOADS)` ② SDK<29 时 `/sdcard/Download` ③ `filesDir/update`，日志 `下载目录 <绝对路径>` 会说明落在哪 |
+| API 18 模拟器上更新装不上 | 老 AVD 默认没挂 SD 卡，`/sdcard` 是悬空链接 → 下载落到 `files/update`（目录 0700、文件 0600），而 4.3 的安装器是**另一个 uid**，进不去那个目录，只回一句「Parse error」。给 AVD 挂个卡就行：`mksdcard -l SDCARD 1G %TEMP%\sdcard.img` + `emulator -avd LeTV -sdcard %TEMP%\sdcard.img`，之后下载会落到 `/storage/sdcard/Android/data/<pkg>/files/Download`，安装器读得到（已验证到安装界面） |
 | 清单能取、APK 下不动 | 大概率是「镜像通过、直连 GitHub 卡住」。日志里看 `开始下载 <url>` 用的是什么前缀 |
 
 ### 9.1 「一直提示有更新」的三个成因

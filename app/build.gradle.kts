@@ -134,19 +134,37 @@ android {
         applicationId = "work.luxiaoxiao.myembyhub"
         // 目标电视是乐视 S50 Air：Android 4.3 / API 18 → minSdk 只能到 18
         minSdk = 18
-        // targetSdk 保持 23：API 24+ 在 4.3 系统上会引入未预期的行为变化
-        targetSdk = 23
+        // targetSdk 34：**一个包同时喂老电视和新电视**。
+        //
+        // ⚠️ 关于「targetSdk 提上去会不会搞坏 4.3」（2026-11-20 定的）：
+        //    系统的兼容性判断一律是 `if (targetSdkVersion >= N)` 形式，而 API 18 的
+        //    ROM 里压根没有 N=24/26/30/34 这些分支（那些代码是后来的系统才加的）。
+        //    所以在 4.3 上 targetSdk=23 和 targetSdk=34 走**同一条路径**，逐字节一致。
+        //    真正会变的只有「API >= N 的系统」，也就是新电视。
+        //
+        //    也正因为如此，targetSdk 千万别拆成两个 flavor：
+        //    4.3 看不出来差别，拆了只会变成两条发布线（两个包互相覆盖 / 两套
+        //    在线更新与反馈 / 用户装错），纯亏。见 AGENTS.md 的「新电视兼容」一节。
+        //
+        //    版本相关的行为差异全部收敛在代码里用 Build.VERSION.SDK_INT 分支：
+        //    存储（私有目录 + FileProvider）、安装（REQUEST_INSTALL_PACKAGES）、
+        //    TLS（系统栈 / Conscrypt）、SNI（SSLParameters / 隐藏 API）。
+        targetSdk = 34
         multiDexEnabled = true
 
-        // 只保留目标设备用得到的 ABI。
+        // 保留三种 ABI：
         //
-        // Conscrypt 的 AAR 里塞了 4 份原生库：armeabi-v7a 1.28MB、x86 2.25MB、
-        // x86_64 2.50MB、arm64-v8a 2.10MB。电视是 armeabi-v7a（MStar 方案），
-        // 其余三份纯粹白占 6.8MB 安装包体积 —— 这台机器存储只有 3.3GB 可用。
+        //   armeabi-v7a —— 乐视 S50 Air（MStar 方案）本来就是 32 位，
+        //                  Conscrypt 的原生库也只有这份在老电视上真正用得上；
+        //   arm64-v8a   —— 新电视 / 新盒子。**少了它，纯 64 位设备直接
+        //                  INSTALL_FAILED_NO_MATCHING_ABIS 装不上**，
+        //                  这是「新电视支持」里唯一一条装不上的硬门槛。
+        //   x86         —— API 18 模拟器（LeTV AVD）用，调试要靠它。
         //
-        // 模拟器（LeTV AVD / sdk_x86）也是 x86，调试要用，所以两个都留。
+        // x86_64 在 `packaging.jniLibs.excludes` 里排掉：没有 x86_64 的电视，
+        // 留着纯占 2.5MB。
         ndk {
-            abiFilters += listOf("armeabi-v7a", "x86")
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86")
         }
 
         // GitHub 仓库（`owner/repo`），在线更新的主来源。
@@ -177,10 +195,10 @@ android {
     // 但那条本身就是真问题：horizontal RecyclerView 的 height=wrap_content，
     // 高度随集数变，`setHasFixedSize(true)` 是在骗框架）。
     //
-    // ExpiredTargetSdkVersion：Google Play 要求 targetSdk ≥ 33。本 App 从来不上
-    // Play（目标设备连 GMS 都没有），而且 targetSdk 必须钉在 23 ——
-    // API 24+ 的行为变化（FileProvider、隐式广播、后台限制）会把 4.3 上的
-    // 外置存储写入和 adbd 安装链路搞坏。这条检查在这里永远不适用。
+    // ExpiredTargetSdkVersion：Google Play 要求 targetSdk ≥ 35。本 App 从来不上
+    // Play（目标设备连 GMS 都没有），而且 targetSdk 定在 34 是「老电视零行为变化」
+    // 和「新电视能过安装门槛」的交点 —— 再往上提就得牵动前台服务、广播这些
+    // 新限制，对这个一万行的自用客户端不值得。这条检查在这里永远不适用。
     // ========================================================================
     lint {
         // 发版不能被「Google Play 上架要求」卡住，但真错误必须拦。
@@ -242,6 +260,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    // Conscrypt 的 AAR 带 4 份原生库（共 ~8.1MB）。我们只要三份：
+    // armeabi-v7a（老电视）、arm64-v8a（新电视）、x86（模拟器）。
+    // x86_64 没有任何目标设备，排掉省 2.5MB。
+    packaging {
+        jniLibs {
+            excludes += "lib/x86_64/**"
         }
     }
 
@@ -344,7 +371,7 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
               "versionName": "$name",
               "url": "$apkDownloadUrl",
               "size": ${apk.length()},
-              "notes": "播放页菜单改成菜单键按一下就出来：选集 / 字幕 / 诊断信息都在里面（以前是连按三次出诊断面板，调试用的那套提示已经删了）。字幕默认关掉——很多资源自带压好的硬字幕，再叠一层就是两行字；要看内嵌字幕在播放页菜单里开，那里会告诉你这部片子有几条内嵌轨。检查更新的弹框现在内容长了会自己滚，按钮不会被顶出屏幕，焦点默认落在按钮上。老的左栏列表界面已经删掉，首页每个区块右边的「更多 ›」直接跳到媒体库并选中对应的库。另外修了首页「更多 ›」点了没反应、以及切过去后焦点落在排序栏上的问题。"
+              "notes": "支持新版安卓电视：Android TV / Google TV 的首页能直接看到图标（以前得进「所有应用」里翻），纯 64 位设备可以装了，Android 14 及以后的系统允许安装。在线更新在 Android 8 及以上会先带你去「安装未知应用」授权一次，允许后返回再点更新，照旧是下载完调起安装器。老电视（Android 4.3）上的行为一点没变：登录、取流、ISO 直放、焦点导航都照旧。\\n\\n上一版：播放页菜单改成菜单键按一下就出来——选集 / 字幕 / 诊断信息都在里面。字幕默认关掉（很多资源自带压好的硬字幕，再叠一层就是两行字），要看内嵌字幕在播放页菜单里开，那里会告诉你这部片子有几条内嵌轨。检查更新的弹框内容长了会自己滚，按钮不会被顶出屏幕，焦点默认落在按钮上。"
             }
             """.trimIndent()
         )

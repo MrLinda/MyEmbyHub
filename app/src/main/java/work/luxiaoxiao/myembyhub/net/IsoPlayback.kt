@@ -20,38 +20,98 @@ interface RawReader {
     fun readAt(offset: Long, length: Int): ByteArray
 }
 
-/**
- * 用 [EmbyHttpDataSource] 按 HTTP Range 从远端 ISO 读原始字节。
- *
- * 每次 [readAt] 开关一次 DataSource —— 连接本身会还回 [EmbyHttpDataSource]
- * 的空闲池（15 秒内可复用），所以后续请求省掉 TCP + TLS 握手；
- * UDF 解析一共也就几十次小块读取，这个开销可以接受。
- */
-class IsoRawReader(
-    private val ctx: Context,
-    private val token: String,
+/** UDF 元数据按精确 Range 读取，正片顺读时保留当前响应。 */
+internal class IsoRawReader(
+    private val source: EmbyHttpDataSource,
     private val uri: Uri
 ) : RawReader {
 
+    private companion object {
+        private const val METADATA_BLOCK_BYTES = 64 * 1024
+    }
+
+    private var nextOffset = -1L
+    private var rangeLeft = 0L
+    private var metadataLength = 0L
+    private var metadataOffset = -1L
+    private var metadata: ByteArray? = null
+    var requestHeaders: Map<String, String> = emptyMap()
+
     override fun readAt(offset: Long, length: Int): ByteArray {
-        require(length > 0) { "length 必须 > 0" }
-        val ds = EmbyHttpDataSource(ctx, token)
-        val buf = ByteArray(length)
-        try {
-            ds.open(DataSpec(uri, offset, length.toLong()))
-            var read = 0
-            while (read < length) {
-                val n = ds.read(buf, read, length - read)
-                if (n <= 0) break
-                read += n
+        require(length > 0)
+        val blockOffset = offset / METADATA_BLOCK_BYTES * METADATA_BLOCK_BYTES
+        val inBlock = (offset - blockOffset).toInt()
+        if (length <= 2048 && inBlock + length <= METADATA_BLOCK_BYTES && offset <= metadataLength - length) {
+            if (metadataOffset != blockOffset) {
+                val blockLength = minOf(metadataLength - blockOffset, METADATA_BLOCK_BYTES.toLong()).toInt()
+                try {
+                    metadata = readRange(blockOffset, blockLength)
+                    metadataOffset = blockOffset
+                } catch (_: IOException) {
+                    return readRange(offset, length)
+                }
             }
-            if (read < length) {
-                throw IOException("ISO 读取不完整：offset=$offset 期望 $length 字节，实得 $read")
-            }
-            return buf
-        } finally {
-            try { ds.close() } catch (ignored: Throwable) {}
+            val block = checkNotNull(metadata)
+            return block.copyOfRange(inBlock, inBlock + length)
         }
+        return readRange(offset, length)
+    }
+
+    fun <T> withMetadataReadAhead(length: Long, parse: () -> T): T {
+        metadataLength = length
+        return try {
+            parse()
+        } finally {
+            metadataLength = 0
+            metadataOffset = -1
+            metadata = null
+        }
+    }
+
+    private fun readRange(offset: Long, length: Int): ByteArray {
+        val data = ByteArray(length)
+        try {
+            readInto(offset, data, 0, data.size, data.size.toLong())
+            return data
+        } finally {
+            close()
+        }
+    }
+
+    /** 复用连续读取的响应；rangeLength 只覆盖当前 extent 内的字节。 */
+    fun readInto(offset: Long, output: ByteArray, outputOffset: Int, length: Int, rangeLength: Long) {
+        var copied = 0
+        try {
+            while (copied < length) {
+                val pos = offset + copied
+                if (pos != nextOffset || rangeLeft == 0L) {
+                    close()
+                    val spec = DataSpec.Builder()
+                        .setUri(uri)
+                        .setPosition(pos)
+                        .setLength(rangeLength - copied)
+                        .setHttpRequestHeaders(requestHeaders)
+                        .build()
+                    rangeLeft = source.open(spec)
+                    nextOffset = pos
+                }
+                val want = minOf((length - copied).toLong(), rangeLeft).toInt()
+                val n = if (want > 0) source.read(output, outputOffset + copied, want) else 0
+                if (n <= 0) throw IOException("ISO 读取不完整：offset=$offset 期望 $length 字节，实得 $copied")
+                rangeLeft -= n
+                nextOffset += n
+                copied += n
+            }
+        } catch (e: IOException) {
+            close()
+            throw e
+        }
+    }
+
+    fun close() {
+        rangeLeft = 0
+        nextOffset = -1
+        source.close()
     }
 }
 
@@ -79,39 +139,31 @@ class IsoRawReader(
  * ```
  * 逻辑字节偏移（所有 extent 首尾相接）→ 落在哪个 extent 的哪个位置
  * ```
- * 一次读 [WINDOW_PACKETS] 个包（跨 extent 时拆成几段拼起来），再统一剥壳。
+ * HTTP 响应覆盖 extent 内的一段连续数据；每次只把一小批包读入内存并剥壳。
  */
-class M2tsDataSource(
-    private val raw: RawReader,
+internal class M2tsDataSource(
+    private val raw: IsoRawReader,
     private val video: Udf.Video,
     private val uri: Uri
 ) : DataSource {
 
     companion object {
-        private const val TAG = "IsoPlay"
-
-        /** 一次预读多少个包。2048 包 = 384KB 原始数据 / 385KB 剥壳后。 */
-        private const val WINDOW_PACKETS = 2048
+        private const val TS_PACKET_BYTES = 188
+        private const val WINDOW_PACKETS = 256
+        private const val MAX_RANGE_BYTES = 8L * 1024 * 1024
     }
 
     private var listener: TransferListener? = null
     private var currentSpec: DataSpec? = null
-    private var opened = false
-    private var ended = false
 
     /** 本次 open 允许读到哪（逻辑偏移，开区间）。 */
     private var limit = 0L
-
-    /** 当前逻辑位置（剥壳后的 TS 字节偏移）。 */
     private var position = 0L
 
-    // ---- 预读窗口 ----
     private var winFirstPacket = -1L
     private var winPackets = 0
-    /** 窗口内容：188 字节/包紧凑存放。 */
-    private var win = ByteArray(0)
-    /** 原始数据缓冲（192 字节/包），跨 extent 拼接用。 */
-    private var rawBuf = ByteArray(0)
+    private val win = ByteArray(WINDOW_PACKETS * TS_PACKET_BYTES)
+    private val rawBuf = ByteArray(WINDOW_PACKETS * video.packetSize)
 
     override fun addTransferListener(transferListener: TransferListener) {
         listener = transferListener
@@ -120,186 +172,100 @@ class M2tsDataSource(
     override fun getUri(): Uri = uri
 
     override fun open(dataSpec: DataSpec): Long {
-        val len = video.logicalLength
-        val start = dataSpec.position.coerceAtLeast(0L)
-        if (start > len) throw IOException("ISO 逻辑长度不足：position=$start len=$len")
+        close()
+        val start = dataSpec.position
+        val available = video.logicalLength - start
+        if (available < 0) throw IOException("ISO 逻辑长度不足：position=$start len=${video.logicalLength}")
+        val length = if (dataSpec.length < 0) available else minOf(available, dataSpec.length)
         position = start
-        limit = if (dataSpec.length < 0) len else minOf(len, start + dataSpec.length)
-        winFirstPacket = -1
-        winPackets = 0
-        ended = false
-        opened = true
+        limit = start + length
         currentSpec = dataSpec
         listener?.onTransferStart(this, dataSpec, false)
-        return limit - start
+        return length
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
-        if (ended || position >= limit) return C.RESULT_END_OF_INPUT
-        if (!opened) throw IOException("DataSource 未打开")
+        val spec = currentSpec ?: throw IOException("DataSource 未打开")
+        if (position >= limit) return C.RESULT_END_OF_INPUT
 
-        val want = minOf(length.toLong(), limit - position).toInt()
-        var remain = want
-        var out = offset
-        while (remain > 0) {
-            val needPacket = position / 188
-            if (needPacket < winFirstPacket || needPacket >= winFirstPacket + winPackets) {
-                loadWindow(needPacket)
-            }
-            if (winPackets <= 0) throw IOException("ISO 窗口为空（位置 $position）")
-            val idx = (position - winFirstPacket * 188).toInt()
-            val avail = winPackets * 188 - idx
-            if (avail <= 0) break   // 兜底，防死循环
-            val n = minOf(remain, avail)
-            System.arraycopy(win, idx, buffer, out, n)
-            out += n
-            remain -= n
-            position += n
-        }
-        val read = want - remain
-        if (read > 0) {
-            currentSpec?.let { listener?.onBytesTransferred(this, it, false, read) }
-        }
-        if (position >= limit) ended = true
-        return if (read > 0) read else C.RESULT_END_OF_INPUT
+        val packet = position / TS_PACKET_BYTES
+        if (packet < winFirstPacket || packet >= winFirstPacket + winPackets) loadWindow(packet)
+        val index = (position - winFirstPacket * TS_PACKET_BYTES).toInt()
+        val available = winPackets * TS_PACKET_BYTES - index
+        val count = minOf(length.toLong(), limit - position, available.toLong()).toInt()
+        System.arraycopy(win, index, buffer, offset, count)
+        position += count
+        listener?.onBytesTransferred(this, spec, false, count)
+        return count
     }
 
     override fun close() {
+        raw.close()
         currentSpec?.let { listener?.onTransferEnd(this, it, false) }
-        opened = false
-        ended = true
         currentSpec = null
         winFirstPacket = -1
         winPackets = 0
-        // 缓冲留着复用：拖动进度条会反复 open/read，
-        // 每次重新分配会把这台 96MB 堆上限的老机器拖进 GC。
     }
-
-    // ==================== 窗口加载 ====================
 
     private fun loadWindow(firstPacket: Long) {
-        val totalPackets = video.logicalLength / 188
-        if (firstPacket >= totalPackets) throw IOException("请求位置超出 ISO 末尾")
-        val count = minOf(WINDOW_PACKETS.toLong(), totalPackets - firstPacket).toInt()
-        if (count <= 0) throw IOException("ISO 空")
+        val lastPacket = (limit - 1) / TS_PACKET_BYTES
+        val count = minOf(WINDOW_PACKETS.toLong(), lastPacket - firstPacket + 1).toInt()
+        readDiskRange(firstPacket * video.packetSize, count * video.packetSize)
 
-        if (win.size < count * 188) win = ByteArray(count * 188)
-        val need = count * video.packetSize
-        if (rawBuf.size < need) rawBuf = ByteArray(need)
-
+        for (i in 0 until count) {
+            val src = i * video.packetSize + video.prefixLen
+            System.arraycopy(rawBuf, src, win, i * TS_PACKET_BYTES, TS_PACKET_BYTES)
+        }
         winFirstPacket = firstPacket
-
-        // 按字节把这一段读出来（可能跨 extent）
-        val diskStart = firstPacket * video.packetSize
-        val got = readDiskRange(diskStart, need)
-
-        // 统一剥壳：192 → 188
-        var src = 0
-        var dst = 0
-        val usable = (got / video.packetSize).toInt()
-        for (i in 0 until usable) {
-            System.arraycopy(rawBuf, src + video.prefixLen, win, dst, 188)
-            src += video.packetSize
-            dst += 188
-        }
-        winPackets = usable
-        if (usable < count) {
-            Log.w(TAG, "ISO 窗口只读到 $usable/$count 个包（first=$firstPacket）")
-        }
+        winPackets = count
     }
 
-    /**
-     * 从「逻辑字节偏移」读 [length] 字节，跨 extent 时拆成几段。
-     *
-     * @return 实际读到的字节数（正常情况等于 [length]）
-     */
-    private fun readDiskRange(logicalStart: Long, length: Int): Int {
-        var got = 0
-        var remaining = length
-        // 先定位起点落在哪个 extent 的第几个字节
-        var extIndex = 0
-        var bytesBefore = 0L
-        while (extIndex < video.extents.size) {
-            val len = video.extents[extIndex].length
-            if (logicalStart < bytesBefore + len) break
-            bytesBefore += len
-            extIndex++
-        }
-        while (remaining > 0 && extIndex < video.extents.size) {
-            val ext = video.extents[extIndex]
-            val offsetInExt = logicalStart + got - bytesBefore
-            if (offsetInExt >= ext.length) {
-                bytesBefore += ext.length
-                extIndex++
-                continue
+    /** 按字节跨 extent，允许一个 192 字节包落在两段中。 */
+    private fun readDiskRange(logicalStart: Long, length: Int) {
+        var copied = 0
+        var before = 0L
+        val diskLimit = ((limit - 1) / TS_PACKET_BYTES + 1) * video.packetSize
+        // 跳转后只打开目标 extent 的对应区间。顺读时接着消费上一窗口的响应。
+        for (extent in video.extents) {
+            val offset = (logicalStart + copied - before).coerceAtLeast(0L)
+            val available = extent.length - offset
+            if (available > 0) {
+                val count = minOf((length - copied).toLong(), available).toInt()
+                val rangeLength = minOf(available, diskLimit - logicalStart - copied, MAX_RANGE_BYTES)
+                raw.readInto(extent.start + offset, rawBuf, copied, count, rangeLength)
+                copied += count
+                if (copied == length) return
             }
-            val n = minOf(remaining.toLong(), ext.length - offsetInExt).toInt()
-            val data = raw.readAt(ext.start + offsetInExt, n)
-            System.arraycopy(data, 0, rawBuf, got, data.size)
-            got += data.size
-            remaining -= data.size
-            if (data.size < n) break   // 读到盘尾（数据不一致）
-            bytesBefore += ext.length
-            extIndex++
+            before += extent.length
         }
-        return got
+        throw IOException("ISO 正片长度不足：offset=$logicalStart 期望 $length 字节，实得 $copied")
     }
 }
 
-/**
- * 判断「这条取流地址里装的是不是光盘镜像」，结果按 URL 缓存。
- *
- * ## 为什么要缓存
- *
- * ExoPlayer 会**并发**创建两个 DataSource（一个 sniff、一个正式读取），
- * 每个都要判断一次；而判断一次 ISO 就是几十次 Range 请求。
- * 缓存之后第二次起直接复用。
- */
+/** 缓存最近一次成功解析的镜像，重播时省掉读取 UDF 目录的多次请求。 */
 private object IsoProbe {
 
-    private val lock = Any()
-    private var cacheUrl: String? = null
-    private var cacheVideo: Udf.Video? = null
-    private var cacheDone = false
+    private data class Parsed(val uri: Uri, val token: String, val video: Udf.Video)
 
-    fun probe(ctx: Context, token: String, uri: Uri, onStep: (String) -> Unit): Udf.Video? {
-        val key = uri.toString()
-        synchronized(lock) {
-            if (cacheDone && cacheUrl == key) return cacheVideo
+    @Volatile private var parsed: Parsed? = null
+
+    fun cached(uri: Uri, token: String): Udf.Video? =
+        parsed?.takeIf { it.uri == uri && it.token == token }?.video
+
+    fun parse(uri: Uri, token: String, raw: RawReader, onStep: (String) -> Unit): Udf.Video? {
+        onStep("解析光盘镜像结构")
+        return Udf.parse(raw, onStep)?.also { video ->
+            Log.i("IsoPlay", "ISO 解析结果：$video")
+            parsed = Parsed(uri, token, video)
         }
-        val raw = IsoRawReader(ctx, token, uri)
-        var video: Udf.Video? = null
-        try {
-            if (Udf.looksLikeIso(raw)) {
-                onStep("解析光盘镜像结构")
-                video = Udf.parse(raw, onStep)
-                Log.i(TAG, "ISO 解析结果：$video")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "ISO 探测失败：${e.message}")
-            video = null
-        }
-        synchronized(lock) {
-            cacheUrl = key
-            cacheVideo = video
-            cacheDone = true
-        }
-        return video
     }
-
-    private const val TAG = "IsoPlay"
 }
 
 /**
  * 能自动认出 ISO 的 DataSource。
  *
- * 这是把整套东西接进 ExoPlayer 的**唯一改动点**：`PlayerActivity` 里
- * 原来 `DataSource.Factory { EmbyHttpDataSource(this, token) }` 换成
- * `IsoDataSourceFactory(this, token, uri)`，其余一行不动。
- *
- * - 普通 mkv / mp4 → 探测一次发现不是 UDF，直接透传给 [EmbyHttpDataSource]，
- *   行为和老版本完全一致，没有任何额外开销（探测本身只发一次 8 字节 Range）。
+ * - 普通 MKV / MP4 → 从第一次响应的前缀检查 UDF 标记，保留同一条流供解封装读取。
  * - 光盘镜像 → 解析出正片 m2ts 的 extent，内部换成 [M2tsDataSource]，
  *   对外表现为「一条 188 字节的长 TS 流」，ExoPlayer 的 TsExtractor 照常解。
  */
@@ -312,8 +278,10 @@ class IsoDataSource(
 
     private var listener: TransferListener? = null
     private var inner: DataSource? = null
+    private val httpSource = EmbyHttpDataSource(ctx, token)
     private var probed = false
-    private var video: Udf.Video? = null
+    private val raw = IsoRawReader(httpSource, uri)
+    private var isoSource: M2tsDataSource? = null
 
     override fun addTransferListener(transferListener: TransferListener) {
         listener = transferListener
@@ -323,15 +291,43 @@ class IsoDataSource(
     override fun getUri(): Uri = uri
 
     override fun open(dataSpec: DataSpec): Long {
+        // ExoPlayer 的额外请求头也用于 UDF 和 m2ts Range，才能安全沿用首次响应的跳转地址。
+        raw.requestHeaders = dataSpec.httpRequestHeaders
         if (!probed) {
+            var video = IsoProbe.cached(uri, token)
+            if (video == null) {
+                val probeLength = Udf.VRS_OFFSET + Udf.VRS_BYTES
+                val canPeek = dataSpec.position == 0L && (dataSpec.length < 0 || dataSpec.length >= probeLength)
+                val httpLength = if (canPeek) {
+                    inner = httpSource
+                    listener?.let { httpSource.addTransferListener(it) }
+                    httpSource.open(dataSpec)
+                } else {
+                    C.LENGTH_UNSET.toLong()
+                }
+                val isIso = if (canPeek) {
+                    Udf.looksLikeIso(httpSource.peekPrefix(probeLength), Udf.VRS_OFFSET)
+                } else {
+                    val vrs = try {
+                        raw.readAt(Udf.VRS_OFFSET.toLong(), Udf.VRS_BYTES)
+                    } catch (_: IOException) {
+                        null
+                    }
+                    vrs != null && Udf.looksLikeIso(vrs, 0)
+                }
+                if (canPeek && !isIso) {
+                    probed = true
+                    return httpLength
+                }
+                if (canPeek) httpSource.close()
+                if (isIso) {
+                    video = raw.withMetadataReadAhead(httpLength) { IsoProbe.parse(uri, token, raw, onStep) }
+                }
+            }
+            isoSource = video?.let { M2tsDataSource(raw, it, uri) }
             probed = true
-            video = IsoProbe.probe(ctx, token, uri, onStep)
         }
-        val ds: DataSource = if (video != null) {
-            M2tsDataSource(IsoRawReader(ctx, token, uri), video!!, uri)
-        } else {
-            EmbyHttpDataSource(ctx, token)
-        }
+        val ds = isoSource ?: httpSource
         listener?.let { ds.addTransferListener(it) }
         inner = ds
         return ds.open(dataSpec)

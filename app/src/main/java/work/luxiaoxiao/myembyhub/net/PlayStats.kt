@@ -134,9 +134,9 @@ object PlayStats {
         }
     }
 
-    /** ExoPlayer 的掉帧回调（累计值，不是增量）。 */
-    fun droppedFrames(total: Int) {
-        synchronized(lock) { if (total > droppedFrames) droppedFrames = total }
+    /** ExoPlayer 每次回调报告自上次通知以来的掉帧数。 */
+    fun droppedFrames(count: Int) {
+        synchronized(lock) { if (startedAt != 0L) droppedFrames += count }
     }
 
     /**

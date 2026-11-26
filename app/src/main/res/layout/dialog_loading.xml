@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「正在检查更新」的等待面板内容（套在 TvDialog 里）。
+
+  以前这里只有一句 Toast「正在检查更新…」，它自己会消失，之后就什么提示都没有 ——
+  镜像站时通时不通，四台机器挨个试最长能拖到几十秒，用户没法判断是「还在试」
+  还是「已经卡死」，只能反复按「检查更新」（每次都会再叠一轮请求）。
+  现在换成一个一直转的弧 + 一直在变的文字，看得见就说明程序还活着。
+
+  ⚠️ 弧是自绘的 [work.luxiaoxiao.myembyhub.ui.LoadingArc]，不是 `<shape shape="ring">`
+     + sweep 渐变 —— 那套在 4.3 上会渲染成四段方形色块跟着转（真机实测）。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingTop="16dp"
+    android:paddingBottom="16dp"
+    android:paddingLeft="24dp"
+    android:paddingRight="24dp">
+
+    <work.luxiaoxiao.myembyhub.ui.LoadingArc
+        android:id="@+id/arc_loading"
+        android:layout_width="44dp"
+        android:layout_height="44dp" />
+
+    <TextView
+        android:id="@+id/tv_loading_text"
+        style="@style/TvSubtitle"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginLeft="20dp"
+        android:gravity="center_vertical"
+        android:lines="1"
+        android:text="正在检查更新" />
+
+</LinearLayout>

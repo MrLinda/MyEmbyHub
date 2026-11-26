@@ -394,6 +394,9 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   但**报错文案完全看不出是权限问题**（只有一句 "Permission denied"）。
   → 电视是 4.3，没有运行时权限机制，`uses-permission` 写上就装机即授；
   → 排查手法：`aapt2 dump permissions <apk>` 直接看打包结果里有没有这条。
+  → **现状（2026-11-20 起）**：在线更新不再写 `/sdcard/Download/`，改下到
+    应用外部私有目录（`getExternalFilesDir(DIRECTORY_DOWNLOADS)`），那条路径不需要任何存储权限；
+    两个权限仍保留但加了 `android:maxSdkVersion="32"`（老版本回退用）。
 - ⚠️ **`RecycledViewPool` 是按 `viewType` 分桶的 —— 两列布局不同却共用一个池会「串台」。**
   （历史坑，出在已删除的 `LibraryActivity` 上，但结论对任何「两列共用回收池」的界面都成立）
   当时左右两列**布局不一样**（左栏 `item_rail` 纯文字、右栏 `item_media` 带海报），
@@ -518,9 +521,12 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
   - 依赖：`org.conscrypt:conscrypt-android:2.5.2`（**必须 2.5.x**：更高版本要 API 21+；
     2.5.2 的 manifest 是 `minSdkVersion=9`，`org.conscrypt.PreKitKatPlatformOpenSSLSocketImplAdapter`
     专门给 4.3 用，它继承 `org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl`）。
-  - `app/build.gradle.kts` 里 `ndk { abiFilters += listOf("armeabi-v7a", "x86") }`：
-    Conscrypt AAR 自带四个 ABI（共 ~8MB），电视只要 armeabi-v7a、模拟器只要 x86，
-    砍掉 arm64/x86_64 省 4.6MB。APK 因此从 2.27MB 涨到 4.11MB。
+  - `app/build.gradle.kts` 里 `ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86") }`：
+    Conscrypt AAR 自带四个 ABI（共 ~8MB）。armeabi-v7a 给电视、x86 给模拟器、
+    **arm64-v8a 给纯 64 位新设备**（2026-11-20 加：缺它新机型直接
+    `INSTALL_FAILED_NO_MATCHING_ABIS`）；仍砍掉 x86_64，靠
+    `packaging { jniLibs { excludes += "lib/x86_64/**" } }` 省 2.5MB。
+    APK 从 2.27MB → 4.11MB（加 Conscrypt），再加 arm64、砍 x86_64 后现为 **3.9MB**。
   - **不要 `Security.insertProviderAt()` 装全局 Provider** —— 那会替换整个进程的 JSSE。
     `TlsStack.conscrypt()` 是 `SSLContext.getInstance("TLS", Conscrypt.newProvider())`，
     作用域只在本 App 自己 new 的 context 上。
@@ -642,7 +648,7 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
     包长靠探测：`head[4]==0x47 && head[4+192]==0x47 && head[4+384]==0x47` 是 192+4；
     `head[0]==0x47...` 是 188+0（有些人把 m2ts 存成标准 TS）。
   - **纯 Kotlin 无 native**：没引 libbluray / libmpv，4.3 能跑，APK 不涨
-    （打出来仍是 ~4.13MB，只是多了十几 KB 字节码）。
+    （包体只多十几 KB 字节码，现在整包 3.9MB）。
     → 这也是和「用 mpv 外挂播放」的分界线。
   - 不做蓝光导航菜单（`index.bdmv` / `PLAYLIST` / `CLIPINF` 一律不读），只放
     `STREAM/` 里最大的那个 m2ts；AACS 加密盘（有 `AACS/` 目录）不在范围。
@@ -855,9 +861,9 @@ adb shell am start --user 0 -a android.intent.action.VIEW \
 - ⚠️ **`enableV1Signing = true` 必须显式开**：Android 4.3 只认 JAR 签名（v1），
   只开 v2 会「解析包时出现问题」。当前配置 v1 + v2 都开，v3/v4 不开（老系统不认）。
 - `release` buildType 必须 `isDebuggable = false` —— R8 才真正生效：
-  release 包 **3.1MB**，debug 包 4.15MB，差的这 1MB 就是没被优化掉的代码。
+  release 包 **3.9MB**（三个 ABI 全带），同名 debug 包要大 1MB 左右，差的那截就是没被优化掉的代码。
 - 新增 `lint { abortOnError = true; checkReleaseBuilds = true; disable += "ExpiredTargetSdkVersion" }`：
-  `targetSdk` 钉死 23、永远不上 Play，那条「targetSdk 过期」检查不适用，其余 lint 错误一律拦构建。
+  本项目永远不上 Play，从不追 Google 的 targetSdk 年限要求，那条「targetSdk 过期」检查不适用；其余 lint 错误一律拦构建。
   （真拦下过一个真问题：`DetailActivity.kt` 里 `epRow.setHasFixedSize(true)` 用在
   `height=wrap_content`、高度随集数变的列表上。）
 - `tools/publish-release.ps1` 现在会校验三件事，任一不过直接 throw：

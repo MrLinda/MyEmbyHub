@@ -94,6 +94,7 @@ class HomeActivity : Activity() {
      * 这个按确认键输入片名……的提示就一直在了」）。所以按页存文案，切页时整页替换。
      */
     private val pageHints = arrayOfNulls<String>(3)
+    private val pageLoading = BooleanArray(3)
 
     /** 顶栏三个 tab（顺序和 `home_nav_titles` 一致）。 */
     private val navItems = ArrayList<View>()
@@ -194,6 +195,7 @@ class HomeActivity : Activity() {
     // ==================== 首页状态 ====================
 
     private val homeRows = ArrayList<RecyclerView>()
+    private val homeRowOrder = ArrayList<Int>()
 
     /**
      * 从详情页返回时要恢复焦点的条目 id。
@@ -292,10 +294,13 @@ class HomeActivity : Activity() {
      * 没有这个守卫的话，老的一代会把新的那批行又追加一遍，
      * 屏幕上会出现两排同一个库。
      */
-    private var homeGeneration = 0
+    @Volatile private var homeGeneration = 0
+    private var homeLoading = false
+    private var autoFocusHome = false
 
     /** 媒体库清单（首页和媒体库页共用一份，避免取两遍）。 */
     private var libraries: List<MediaItem> = emptyList()
+    private val libraryCallbacks = ArrayList<(Result<List<MediaItem>>) -> Unit>()
 
     /** 一条横滑行 = 一个区块。 */
     private class Section(val title: String, val libraryId: String, val items: List<MediaItem>)
@@ -336,6 +341,7 @@ class HomeActivity : Activity() {
 
         // 首屏：首页先取数，焦点落在第一张卡上
         showPage(0)
+        navItems.firstOrNull()?.requestFocus()
         loadHome(focusFirst = true)
     }
 
@@ -483,13 +489,14 @@ class HomeActivity : Activity() {
      */
     private fun switchTab(index: Int, libraryTarget: Int = -1) {
         if (index !in 0..2) return
+        if (index != 0) autoFocusHome = false
         tabIndex = index
         for (i in navItems.indices) navItems[i].isSelected = i == index
         refreshNavUnderlines()
         // 先按目标页切显隐，取完数再交给 revealPage 收尾
         showPage(index)
         when (index) {
-            0 -> if (pageReady[0]) revealPage(0) else loadHome(focusFirst = false)
+            0 -> if (!pageReady[0] && !homeLoading) loadHome(focusFirst = false)
             1 -> if (libraryTarget >= 0) {
                 // 指定了库：跳过 loadLibraryPageIfNeeded 的「选当前库」，
                 // 免得同一个库被拉两遍（见 KDoc）。左栏 tab 还没建就先建出来。
@@ -527,7 +534,7 @@ class HomeActivity : Activity() {
         // ⚠️ 只在「还没搜过」时插手：搜过之后空态文案归 runSearch 管（「没有找到相关内容」），
         //    这里无条件 hide 会把那句话抹掉
         if (index == 2 && searchQuery.isEmpty()) pageHints[2] = getString(R.string.search_guide)
-        applyPageHint(index)
+        updateLoadingUi()
     }
 
     /**
@@ -545,78 +552,43 @@ class HomeActivity : Activity() {
 
     // ==================== 首页 ====================
 
-    /**
-     * 取首页数据：继续观看 + 每个库最新若干条。
-     *
-     * **到一行画一行**：全部取完再画的话首屏要空白十几秒（实测 24s）。
-     * 每取完一块就 `post` 上去，3 秒就能看到第一行。
-     *
-     * 各库之间**两路并发**（[rowPool]），但**放行顺序仍按库的原始顺序** ——
-     * 否则每次进首页各行上下位置都会变。详见循环里的注释。
-     */
+    /** 两条首页请求并行，回调都在主线程更新页面。 */
     private fun loadHome(focusFirst: Boolean) {
-        showLoading(true)
+        if (homeLoading) return
+        homeLoading = true
         homePendingReset = true
-        pageReady[0] = false
-        // 每次重新取首页都换一代；老一代的回调回来时直接丢掉
-        // （播完回来会再调一次 loadHome，两次的图片/行不能混在一起）
+        autoFocusHome = focusFirst
+        if (tabIndex == 0) updateLoadingUi()
         val gen = ++homeGeneration
+        var pending = 2
+        var firstFailure: Throwable? = null
 
-        worker.execute {
-            val resumeResult = api.resume(ROW_LIMIT)
-            if (gen != homeGeneration) return@execute
-            val resumeItems = resumeResult.getOrNull().orEmpty()
-            if (resumeItems.isNotEmpty()) {
-                main.post {
-                    if (gen == homeGeneration) {
-                        appendSection(Section(getString(R.string.home_resume), "", resumeItems))
-                    }
-                }
+        fun finished(error: Throwable? = null) {
+            if (firstFailure == null) firstFailure = error
+            if (--pending != 0) return
+            homeLoading = false
+            if (homePendingReset && firstFailure == null) clearHomeSections()
+            val failure = firstFailure
+            if (homeRows.isEmpty()) {
+                val hint = if (failure == null) getString(R.string.home_empty)
+                else getString(R.string.home_failed, friendlyError(failure))
+                showHint(hint, 0)
             }
-
-            val libsResult = api.libraries()
-            if (gen != homeGeneration) return@execute
-            val libs = libsResult.getOrNull().orEmpty()
-            libraries = libs
-            if (libs.isEmpty()) {
-                val err = libsResult.exceptionOrNull()
-                main.post {
-                    if (gen != homeGeneration) return@post
-                    showLoading(false)
-                    // 提示语三页共用，别把用户当前所在页的提示覆盖掉
-                    // ⚠️ 文案记在**首页**名下（page = 0），不是记在「当前 tab」名下：
-                    //    取数要十几秒，这期间用户可能已经切走了，记错页就等于把
-                    //    首页的空态挂到搜索页上；而且切回来还得能看见。
-                    if (err != null) {
-                        showHint(getString(R.string.home_failed, friendlyError(err)), 0)
-                    } else {
-                        showHint(getString(R.string.home_empty), 0)
-                        revealPage(0)
-                    }
-                }
-                return@execute
+            pageReady[0] = homeRows.isNotEmpty() || failure == null
+            if (tabIndex == 0) {
+                updateLoadingUi()
+                if (pendingFocusItemId != null) restoreHomeFocus()
             }
+        }
 
-            // ⚠️ 每个库各取 20 条，**两路并发**（2026-11-19 改）。
-            //
-            // 原来是串行 for 循环：五六个库 = 五六次「建连 + TLS + 等响应」。
-            // 这台机器一次完整握手实测 1.1~3.6 秒（见 docs/tv-device-report），
-            // 串起来首屏要十几秒，用户感受就是「打开就卡住」。
-            // 并发之后最慢的那一路决定总时长，首屏大约快一半。
-            //
-            // 为什么只开两路：MStar 双核 1GHz，再多人也只是互相抢 CPU 和带宽，
-            // 而且这台电视的内存只够同时挂两三个响应体。
-            val rows = libs.take(MAX_LIBRARY_ROWS)
-            val results = arrayOfNulls<List<MediaItem>>(rows.size)
-            val lock = Any()
-            var cursor = 0
-            var drawnCount = 0
-            val remaining = java.util.concurrent.atomic.AtomicInteger(rows.size)
-
-            for (i in rows.indices) {
+        requestLibraries { result ->
+            if (gen != homeGeneration) return@requestLibraries
+            val rows = result.getOrNull().orEmpty().take(MAX_LIBRARY_ROWS)
+            pending += rows.size
+            rows.forEachIndexed { index, lib ->
                 rowPool.execute {
-                    val lib = rows[i]
-                    val r = api.items(
+                    if (gen != homeGeneration) return@execute
+                    val items = api.items(
                         lib.id,
                         recursive = true,
                         limit = ROW_LIMIT,
@@ -624,84 +596,84 @@ class HomeActivity : Activity() {
                         descending = true,
                         includeItemTypes = POSTER_TYPES
                     )
-                    val items = r.getOrNull().orEmpty()
-                    synchronized(lock) {
-                        results[i] = items
-                        // **严格按库的顺序放行**：先到的不能跳队。
-                        // 否则每次进首页，各行的上下位置都会变（哪个库先回来哪个在上面），
-                        // 用户熟悉的「第三排是电影」就没了。
-                        while (cursor < results.size && results[cursor] != null) {
-                            val idx = cursor
-                            val sec = results[idx].orEmpty()
-                            results[idx] = null
-                            cursor++
-                            if (sec.isNotEmpty()) {
-                                drawnCount++
-                                if (gen == homeGeneration) {
-                                    main.post {
-                                        if (gen == homeGeneration) {
-                                            appendSection(Section(rows[idx].name, rows[idx].id, sec))
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    main.post {
+                        if (gen != homeGeneration) return@post
+                        val data = items.getOrNull().orEmpty()
+                        if (data.isNotEmpty()) addHomeSection(index + 1, Section(lib.name, lib.id, data))
+                        finished(items.exceptionOrNull())
                     }
-                    if (remaining.decrementAndGet() == 0) {
-                        val drawn = synchronized(lock) { drawnCount }
-                        main.post {
-                            if (gen != homeGeneration) return@post
-                            showLoading(false)
-                            if (drawn == 0 && resumeItems.isEmpty()) {
-                                showHint(getString(R.string.home_empty), 0)
-                            }
-                            revealPage(0)
-                            // ⚠️ 只有「用户还在首页」时才把焦点抓去第一张卡。
-                            //    取数要十几秒，这期间用户很可能已经切到媒体库/搜索页了 ——
-                            //    无条件 requestFocus 会把焦点从顶栏抢到一个 GONE 的页面里，
-                            //    结果是整屏没有任何高亮、方向键全部失效（实测踩过）。
-                            if (focusFirst && tabIndex == 0) {
-                                focusHomeFirstCard(force = true)
-                            } else if (tabIndex == 0) {
-                                restoreHomeFocus()
-                            }
-                        }
-                    }
+                }
+            }
+            finished(result.exceptionOrNull())
+        }
+
+        rowPool.execute {
+            val result = api.resume(ROW_LIMIT)
+            main.post {
+                if (gen != homeGeneration) return@post
+                val items = result.getOrNull().orEmpty()
+                if (items.isNotEmpty()) addHomeSection(0, Section(getString(R.string.home_resume), "", items))
+                finished(result.exceptionOrNull())
+            }
+        }
+    }
+
+    /** 首页和媒体库共享进行中的库列表请求。 */
+    private fun requestLibraries(onResult: (Result<List<MediaItem>>) -> Unit) {
+        libraryCallbacks.add(onResult)
+        if (libraryCallbacks.size > 1) return
+        rowPool.execute {
+            val result = api.libraries()
+            main.post {
+                if (isFinishing || isDestroyed) return@post
+                result.onSuccess { libraries = it }
+                val callbacks = libraryCallbacks.toList()
+                libraryCallbacks.clear()
+                callbacks.forEach { it(result) }
+            }
+        }
+    }
+
+    private fun clearHomeSections() {
+        sectionContainer.removeAllViews()
+        homeRows.clear()
+        homeMoreChips.clear()
+        homeRowOrder.clear()
+    }
+
+    /** 哪一行先返回就先展示。插入位置仍按媒体库顺序，「继续观看」固定在最前。 */
+    private fun addHomeSection(order: Int, sec: Section) {
+        if (homePendingReset) {
+            clearHomeSections()
+            homePendingReset = false
+        }
+        val index = homeRowOrder.indexOfFirst { it > order }.let { if (it < 0) homeRows.size else it }
+        val row = createRow(sec)
+        homeRows.add(index, row)
+        homeRowOrder.add(index, order)
+        sectionContainer.addView(createHeader(sec.title, sec.libraryId, row, index), index * 2)
+        sectionContainer.addView(row, index * 2 + 1)
+        // 当晚到的区块插到第一个时，原来的首行标题改用普通区块的内边距。
+        if (index == 0 && homeRows.size > 1) {
+            sectionContainer.getChildAt(2).setPadding(dp(24), dp(16), dp(24), 0)
+        }
+        hideHint(0)
+        if (tabIndex == 0) {
+            updateLoadingUi()
+            main.post {
+                if (tabIndex != 0 || PopupGate.anyOpen()) return@post
+                val focus = currentFocus
+                if (autoFocusHome && (focus == null || focus === pageHome || focus === navItems.firstOrNull())) {
+                    autoFocusHome = false
+                    focusHomeFirstCard(force = true)
+                } else if (focus == null || focus === pageHome) {
+                    focusHomeFirstCard()
                 }
             }
         }
     }
 
-    /** 往首页塞一行；第一块新数据到了才清老内容。 */
-    private fun appendSection(sec: Section) {
-        if (homePendingReset) {
-            sectionContainer.removeAllViews()
-            homeRows.clear()
-            homeMoreChips.clear()
-            homePendingReset = false
-        }
-        val index = homeRows.size
-        sectionContainer.addView(createHeader(sec.title, sec.libraryId, index))
-        sectionContainer.addView(createRow(sec, index))
-
-        // 第一行已经画出来了 —— 全屏转圈该收了。
-        // 不等 `loadHome` 整体结束：各行是并发取的，最慢的那一路回来之前屏幕上
-        // 已经有内容了，转圈还赖在正中，还会挡住刚画出来的卡片（实测：转圈叠在
-        // 「继续观看」的海报上）。顶栏底下那条 3dp 跑马灯继续跑，暗示「后面还有」。
-        if (index == 0) hideSpinner()
-
-        // 后面几行陆续进来时 ScrollView 会重新测量，极端情况下会把刚设好的焦点丢掉，
-        // 整屏变成「没有任何高亮」。只在焦点本来就悬空/停在滚动容器上时兜一次，
-        // 用户已经走到 tab 或卡片上时绝不抢。
-        if (tabIndex == 0) {
-            main.post {
-                val cf = currentFocus
-                if (cf == null || cf === pageHome) focusHomeFirstCard()
-            }
-        }
-    }
-
-    private fun createHeader(title: String, libraryId: String, index: Int): View {
+    private fun createHeader(title: String, libraryId: String, cards: RecyclerView, index: Int): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -709,7 +681,6 @@ class HomeActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(HEADER_HEIGHT_DP)
             )
             // ⚠️ 只在非首节加 topMargin：加了以后 chip 的底边会压到下一排卡片上
-            if (index > 0) setPadding(0, dp(16), 0, 0)
             setPadding(dp(24), if (index > 0) dp(16) else 0, dp(24), 0)
         }
 
@@ -738,7 +709,7 @@ class HomeActivity : Activity() {
                 if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_DOWN -> {
-                        homeRows.getOrNull(index)?.let { focusCardIn(it, 0) }
+                        focusCardIn(cards, 0)
                         true
                     }
                     // ← 回本排最后一张卡（焦点左移一格）；→ 是屏幕边缘，吃掉合理。
@@ -747,10 +718,9 @@ class HomeActivity : Activity() {
                     //    会回到顶栏，按理说应该是焦点左移一个吧」。方向键就该是「移动一格」，
                     //    「更多」在行末右侧，它左边正好是本排最后一张卡。
                     KeyEvent.KEYCODE_DPAD_LEFT -> {
-                        val rv = homeRows.getOrNull(index)
-                        val last = (rv?.adapter?.itemCount ?: 0) - 1
-                        if (rv != null && last >= 0) {
-                            focusCardIn(rv, last)
+                        val last = (cards.adapter?.itemCount ?: 0) - 1
+                        if (last >= 0) {
+                            focusCardIn(cards, last)
                             true
                         } else {
                             false
@@ -765,14 +735,14 @@ class HomeActivity : Activity() {
             )
             lp.rightMargin = dp(4)
             row.addView(more, lp)
-            homeMoreChips.add(more)
+            homeMoreChips.add(index, more)
         } else {
-            homeMoreChips.add(null)
+            homeMoreChips.add(index, null)
         }
         return row
     }
 
-    private fun createRow(sec: Section, rowIndex: Int): View {
+    private fun createRow(sec: Section): RecyclerView {
         val rv = RecyclerView(this)
         rv.layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(ROW_HEIGHT_DP)
@@ -794,7 +764,7 @@ class HomeActivity : Activity() {
             //    直接跳到了「媒体库」tab（日志 h5 y=114 → h6 顶栏），
             //    第一排那两张卡用户再也回不去。
             firstRowCount = sec.items.size,
-            onUpFromFirstRow = { pos -> focusRowAbove(rowIndex, pos) },
+            onUpFromFirstRow = { pos -> focusRowAbove(homeRows.indexOf(rv), pos) },
             firstColumnCount = 1,
             onLeftFromFirstColumn = {
                 // 行首按 ←：不动，吃掉这次按键（2026-11-18 用户明确要求）。
@@ -815,7 +785,7 @@ class HomeActivity : Activity() {
             // 行末按 →：去这一排的「更多 ›」（区块标题那一行的右端）。
             // 没有「更多」的区块返回 false，让框架照常把焦点带到下一排。
             onRightFromLastCard = { _ ->
-                val chip = homeMoreChips.getOrNull(rowIndex)
+                val chip = homeMoreChips.getOrNull(homeRows.indexOf(rv))
                 if (chip != null && chip.isShown && chip.requestFocus()) true else false
             },
             onCardFocused = {
@@ -830,12 +800,11 @@ class HomeActivity : Activity() {
                 // ⚠️ 必须 `post`：焦点变化回调跑在 `View.requestFocus()` 内部，
                 //    紧接着父容器才调 `requestChildRectangleOnScreen` 把卡片滚进可视区，
                 //    在这里同步 `scrollTo(0,0)` 会被那次滚动直接盖掉（实测 t3 仍是 114）。
-                if (rowIndex == 0) {
+                if (homeRows.firstOrNull() === rv) {
                     pageHome.post { if (pageHome.scrollY != 0) pageHome.scrollTo(0, 0) }
                 }
             }
         )
-        homeRows.add(rv)
         return rv
     }
 
@@ -1041,21 +1010,18 @@ class HomeActivity : Activity() {
             selectLibrary(libIndex, focusGrid = false)
             return
         }
-        showLoading(true)
-        worker.execute {
-            val r = api.libraries()
-            main.post {
-                showLoading(false)
-                r.onSuccess { libs ->
-                    libraries = libs
-                    if (libs.isEmpty()) {
-                        showHint(getString(R.string.library_empty), 1)
-                        return@onSuccess
-                    }
-                    buildLibTabs()
-                    selectLibrary(0, focusGrid = false)
-                }.onFailure { showHint(getString(R.string.home_failed, friendlyError(it)), 1) }
-            }
+        if (pageLoading[1]) return
+        showLoading(true, page = 1)
+        requestLibraries { result ->
+            showLoading(false, page = 1)
+            result.onSuccess { libs ->
+                if (libs.isEmpty()) {
+                    showHint(getString(R.string.library_empty), 1)
+                    return@onSuccess
+                }
+                buildLibTabs()
+                selectLibrary(0, focusGrid = false)
+            }.onFailure { showHint(getString(R.string.home_failed, friendlyError(it)), 1) }
         }
     }
 
@@ -1194,7 +1160,7 @@ class HomeActivity : Activity() {
         //    改成只在海报墙那块转（`box_lib_loading`）—— 网格会被清空，
         //    那两秒纯黑跟「这个库是空的」分不出来，必须有东西说明在忙。
         val firstEnter = libTabs.isEmpty()
-        showLoading(firstEnter)
+        showLoading(firstEnter, page = 1)
         showLibLoading(!firstEnter)
 
         worker.execute {
@@ -1211,7 +1177,7 @@ class HomeActivity : Activity() {
                 if (libShownId != lib.id) return@post
                 libLoading = false
                 showLibLoading(false)
-                showLoading(false)
+                showLoading(false, page = 1)
                 r.onSuccess { list ->
                     libOffset = list.size
                     libAtEnd = list.size < PAGE_LIMIT
@@ -1375,11 +1341,11 @@ class HomeActivity : Activity() {
     private fun runSearch(query: String) {
         searchQuery = query
         searchBox.text = query
-        showLoading(true)
+        showLoading(true, page = 2)
         worker.execute {
             val r = api.search(query, SEARCH_LIMIT)
             main.post {
-                showLoading(false)
+                showLoading(false, page = 2)
                 r.onSuccess { list ->
                     searchAdapter?.submit(list)
                     if (list.isEmpty()) showHint(getString(R.string.search_empty), 2)
@@ -1612,11 +1578,12 @@ class HomeActivity : Activity() {
             startPlayer(item, item.mediaSourceId, startMs)
             return
         }
-        showLoading(true)
+        val page = tabIndex
+        showLoading(true, page)
         worker.execute {
             val r = api.itemDetail(item.id)
             main.post {
-                showLoading(false)
+                showLoading(false, page)
                 val detail = r.getOrNull()
                 val msId = detail?.mediaSourceId.orEmpty()
                 if (msId.isEmpty()) {
@@ -1969,24 +1936,21 @@ class HomeActivity : Activity() {
 
     // ==================== 提示 / 杂项 ====================
 
-    private fun showLoading(on: Boolean) {
-        pbLoading.visibility = if (on) View.VISIBLE else View.GONE
-        boxLoading.visibility = if (on) View.VISIBLE else View.GONE
-        // 转圈和提示语都摆在屏幕正中，同时出现会叠在一起。
-        // 分工很清楚：转圈 =「还没有结果」，提示语 =「结果是这样」。
-        // 所以开始加载就把提示语收起来，加载完再按当前页的账本恢复。
-        if (on) tvHint.visibility = View.GONE else applyPageHint(tabIndex)
+    private fun showLoading(on: Boolean, page: Int) {
+        pageLoading[page] = on
+        if (page == tabIndex) updateLoadingUi()
     }
 
-    /**
-     * 只收居中的大转圈，顶栏底下那条 3dp 跑马灯继续跑。
-     *
-     * 用在「已经画出第一批内容、但后面还有几行在路上」的时候：
-     * 屏幕上既然有东西可看，正中就不该再杵一个转圈挡着。
-     */
-    private fun hideSpinner() {
-        boxLoading.visibility = View.GONE
+    private fun updateLoadingUi() {
+        val loading = isPageLoading(tabIndex)
+        pbLoading.visibility = if (loading) View.VISIBLE else View.GONE
+        // 首页只在没有任何区块时显示居中的转圈，已有内容时保留顶栏进度条。
+        val showSpinner = loading && (tabIndex != 0 || homeRows.isEmpty())
+        boxLoading.visibility = if (showSpinner) View.VISIBLE else View.GONE
+        if (loading) tvHint.visibility = View.GONE else applyPageHint(tabIndex)
     }
+
+    private fun isPageLoading(page: Int): Boolean = pageLoading[page] || (page == 0 && homeLoading)
 
     /**
      * 媒体库**切库**时的转圈：只盖在海报墙那一块上。
@@ -2007,7 +1971,7 @@ class HomeActivity : Activity() {
         // 只改可见性的话，搜索页那句「按确认键输入片名…」会跟着用户一路飘到首页上
         // （实测：进一趟搜索页再回首页，那行字就赖在那儿不走了）。
         pageHints[page] = text
-        if (page != tabIndex) return
+        if (page != tabIndex || isPageLoading(page)) return
         tvHint.text = text
         tvHint.visibility = View.VISIBLE
     }
@@ -2070,6 +2034,7 @@ class HomeActivity : Activity() {
     }
 
     override fun onDestroy() {
+        homeGeneration++
         super.onDestroy()
         cancelTabSwitch()
         cancelLibSwitch()
@@ -2080,6 +2045,7 @@ class HomeActivity : Activity() {
         // 首页各行的取数池也必须收：Activity 没了线程还在发请求，
         // 回来的结果会 post 到一个已经 detach 的界面上（虽然守卫拦得住，但白耗 CPU 和流量）
         rowPool.shutdownNow()
+        libraryCallbacks.clear()
     }
 
     private fun hideSystemBars() {

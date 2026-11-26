@@ -1,27 +1,93 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 电视不需要软键盘，但 EditText 需要它才能输入 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!--
-      在线更新要把 APK 下载到 /sdcard/Download/，API 18 上写外置存储**必须**有这个权限，
-      否则 FileOutputStream 直接抛 FileNotFoundException: (Permission denied)。
-      电视是 Android 4.3，没有运行时权限机制，装机即授予。
+      在线更新要把 APK 下载到外置存储。
+
+      ⚠️ 这两条**只对老系统有意义**，所以加了 maxSdkVersion="32"：
+        - 4.3（API 18）上写 getExternalFilesDir() 必须声明 WRITE_EXTERNAL_STORAGE
+          （API 19 起才免权限），而 4.3 没有运行时权限机制，装机即授予；
+        - Android 13+ 起这两条权限对 App 已完全无效（分区存储），留着只会让
+          安装包申请一堆用不上的权限 —— maxSdkVersion 让新系统直接看不到它们。
+      ⚠️ targetSdk=23 意味着 Android 6.0+ 上它们属于**运行时权限**，装机不会自动授予。
+         所以下载目录**不能**依赖 /sdcard/Download（那段兜底已经删了），
+         统一走 getExternalFilesDir() —— 那个目录从 API 19 起免权限，
+         在 18 上靠这条声明就够。
     -->
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!--
+      在线更新最后一步是「调起系统安装器」。Android 8.0（API 26）起，请求安装 APK 的
+      App 自己必须声明这条权限，还要用户在「安装未知应用」里放行 —— 没声明的话
+      安装器会直接把请求拦掉，表现为「下载完成」之后什么也没发生。
+      4.3 上这是未定义权限，装机时被忽略，无害。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- 扫码登录要显示电视的局域网 IP，需要读 WiFi DHCP 信息 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!--
+      ==================== 电视形态声明 ====================
+
+      required="false" 是关键：这是给「可能没有这些硬件的设备」打的标记。
+
+      - leanback      : 没有它，新电视的 Android TV / Google TV 桌面会把本 App 当
+                        「手机应用」对待，不认 LEANBACK_LAUNCHER；
+      - touchscreen   : 电视没有触摸屏，required 写成默认的 true 会反过来把电视排除掉；
+      - 电池 / 电话   : 让 Play 和各家应用市场不在「不支持的设备」里过滤掉（不上架也
+                        没坏处，OEM 自带商店会读）。
+    -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.battery"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.telephony"
+        android:required="false" />
+
+    <!--
+      ==================== 包可见性（Android 11 / API 30 起） ====================
+
+      不声明这段的话，`Intent(ACTION_VIEW)` 指向一个 apk 时，系统**看不到**安装器
+      这个候选 App（包可见性默认收紧），startActivity 直接 ActivityNotFound。
+      症状和「没声明 REQUEST_INSTALL_PACKAGES」几乎一样，很难区分。
+
+      目标 MIME 必须和 UpdateManager.install() 里 setDataAndType 用的完全一致。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
+        <!-- 设置页的「安装未知应用」授权页（Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES） -->
+        <intent>
+            <action android:name="android.settings.MANAGE_UNKNOWN_APP_SOURCES" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
+        android:banner="@drawable/tv_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.MyEmbyHub"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        tools:targetApi="21">
 
         <activity
             android:name=".ui.LoginActivity"
@@ -31,6 +97,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!--
+                  ⚠️ 少了这一行，新电视首页那块「应用」区里根本看不到 MyEmbyHub，
+                      只能在「所有应用」里翻 —— 等于没装。
+                      4.3 不认识这个 category，是被忽略的未知字符串，对老电视无害。
+                -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 
@@ -52,6 +124,30 @@
             android:screenOrientation="landscape"
             android:configChanges="keyboardHidden|orientation|screenSize"
             android:theme="@style/Theme.MyEmbyHub" />
+
+        <!--
+          ==================== FileProvider（在线更新的安装链路） ====================
+
+          为什么必须有：targetSdk ≥ 24 起，`file://` 开头的 Uri 一旦跨进程传给安装器，
+          系统直接抛 FileUriExposedException。而 Android 11+ 又把
+          /sdcard/Android/data/<pkg>/ 用 FUSE 隔离开，安装器（另一个 uid）顺着
+          file:// 路径也读不到。唯一同时满足两边的做法：content:// + 临时读授权。
+
+          路径白名单在 res/xml/file_paths.xml，必须覆盖 UpdateManager 的两个下载目录：
+            external-files-path  →  /sdcard/Android/data/<pkg>/files/Download/
+            files-path           →  /data/data/<pkg>/files/update/（模拟器兜底）
+
+          authorities 用 ${applicationId} 占位符：改包名时不会漏。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

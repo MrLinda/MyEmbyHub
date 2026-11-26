@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ============================================================================
+    FileProvider 的路径白名单
+    ============================================================================
+
+    ⚠️ 这里的每一项都必须和 UpdateManager.resolveDownloadDir() 返回的目录对得上。
+       对不上的话 `FileProvider.getUriForFile()` 会抛 IllegalArgumentException:
+       "Failed to find configured root that contains ..." —— 只在真机上才炸，
+       编译期看不出来。
+
+    三个目录是「谁先建得出来用谁」，不是同时用：
+
+      external-files-path  /sdcard/Android/data/<pkg>/files/Download/
+                           正常路径（新系统也走这条）。API 19+ 免权限。
+      external-path        /sdcard/Download/
+                           老系统的历史路径，只在 API < 29 上被选中；
+                           4.3 真机一直走这条，留着当退路。
+      files-path           /data/data/<pkg>/files/update/
+                           只在外置存储整个不可用时兜底（API 18 模拟器），
+                           真机上走不到。⚠️ 老系统（≤ 4.4）落在这种目录时
+                           安装器读不到，会提前被 UpdateManager 拦下并说明原因。
+
+    path 是**相对根目录**的子路径，末尾的斜杠无所谓，但别写成绝对路径。
+-->
+<paths>
+
+    <!-- Context.getExternalFilesDir(DIRECTORY_DOWNLOADS) → .../files/Download -->
+    <external-files-path
+        name="update_external"
+        path="Download/" />
+
+    <!-- Environment.getExternalStorageDirectory()/Download → /sdcard/Download -->
+    <external-path
+        name="update_sdcard"
+        path="Download/" />
+
+    <!-- File(filesDir, "update") → .../files/update -->
+    <files-path
+        name="update_internal"
+        path="update/" />
+
+</paths>

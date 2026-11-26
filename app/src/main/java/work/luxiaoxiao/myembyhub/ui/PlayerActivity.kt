@@ -230,8 +230,9 @@ class PlayerActivity : Activity() {
     private var lastSampleAt = 0L
     /** 正在显示网速（起播阶段）。 */
     private var speedVisible = false
-    /** 峰值速度，起播结束时用来判断「慢不慢」。 */
-    private var peakBytesPerSec = 0L
+    private var bufferingStartedAt = 0L
+    private var bufferingStartBytes = 0L
+    private var bufferingAfterFirstFrame = false
 
     /**
      * 每 0.5 秒刷新一次网速。
@@ -251,7 +252,6 @@ class PlayerActivity : Activity() {
             if (dt > 0) {
                 val delta = (total - lastBytes).coerceAtLeast(0L)
                 val bps = delta * 1000L / dt
-                if (bps > peakBytesPerSec) peakBytesPerSec = bps
 
                 // 两次采样取平均再显示。
                 // 原因：ExoPlayer 缓冲够了就停止下载，单次采样会突然掉到 0 B/s，
@@ -260,24 +260,12 @@ class PlayerActivity : Activity() {
                 lastBps = bps
                 tvSpeed.text = formatSpeed(shown)
 
-                // 已经下了一大堆却还是 0 B/s —— 那是下完了在解码，不是网络卡住。
-                // 这句提示正是用户要的「知道软件没卡」。
-                tvSpeedHint.text = if (shown == 0L && total > 1L * 1024 * 1024) {
-                    "已下载 ${formatSize(total)}，正在解码…"
-                } else {
-                    "正在缓冲…"
-                }
-
-                if (++speedSamples % 10 == 0) {
-                    android.util.Log.i("TvCheck", "网速 ${tvSpeed.text}  累计=$total 字节")
-                }
             }
             lastBytes = total
             lastSampleAt = now
             main.postDelayed(this, SPEED_INTERVAL_MS)
         }
     }
-    private var speedSamples = 0
     private var lastBps = 0L
 
     /** 上报走单线程，别和 UI 抢主线程 */
@@ -349,17 +337,20 @@ class PlayerActivity : Activity() {
         episodeIndex = episodes.indexOfFirst { it.id == itemId }
         if (episodes.isEmpty() && itemId.isNotEmpty()) loadEpisodeListAsync(itemId)
 
-        // 缓冲水位：默认的 50s/2.5s 在这台机器 + 公网 4K 源上太浅，
-        // 稍微掉点速就开始转圈。这里加大到 30s 起步、最多囤 2 分钟 ——
-        // 起播会慢一点点，但换来的是拖动后不容易卡住。
-        // 注意：**不限制分辨率/码率**，4K 片源照播（硬解 OMX.MS.HEVC 能扛）。
+        // 30 秒是后台继续补缓冲的水位。首播和卡顿恢复的等待阈值单独设置。
+        // ExoPlayer 的默认视频队列目标约 125 MiB，在 96 MiB 堆的老电视上留不下解码和 UI 的空间。
+        val mib = 1024 * 1024
+        val bufferBytes = (Runtime.getRuntime().maxMemory() / 3)
+            .coerceIn(16L * mib, 64L * mib).toInt()
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                30_000,   // 缓冲到 30s 才开始播
-                120_000,  // 最多囤 2 分钟
-                2_500,    // 起播后维持 2.5s 就够
-                5_000     // 卡顿恢复需要 5s
+                30_000,  // 后台补缓冲的低水位
+                60_000,  // 缓冲时长上限，同时受字节目标约束
+                2_500,   // 起播或跳转后开播
+                3_000    // 播放中断后恢复
             )
+            .setTargetBufferBytes(bufferBytes)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build()
 
         // 显式给一个 TrackSelector，但**不设任何尺寸上限**：
@@ -573,10 +564,10 @@ class PlayerActivity : Activity() {
                 diag("FIRST FRAME rendered")
                 main.post {
                     // 出画了就说明之前那句「解不了」是误报，必须收掉；
-                    // 网速浮层也一起收，别挡正片。
+                    // seek 后可能先渲染一张预览帧，继续等缓冲结束再收网速浮层。
                     tvDiag.visibility = View.GONE
                     tvError.visibility = View.GONE
-                    hideSpeed()
+                    if (p.playbackState != Player.STATE_BUFFERING) hideSpeed()
                 }
             }
 
@@ -613,10 +604,13 @@ class PlayerActivity : Activity() {
                 // 起播时的缓冲：显示网速。中途卡顿重新缓冲（已经出过画）也显示，
                 // 这时候用户同样需要知道「是在下，不是死了」。
                 main.post {
+                    if (p.playbackState != state) return@post
                     if (firstFrameRendered && state == Player.STATE_BUFFERING) {
                         showSpeed("缓冲中…")
                     } else if (state == Player.STATE_READY && firstFrameRendered) {
                         hideSpeed()
+                    } else if (state == Player.STATE_READY && speedVisible) {
+                        tvSpeedHint.text = "等待首帧…"
                     }
                 }
             }
@@ -709,9 +703,7 @@ class PlayerActivity : Activity() {
         // ExoPlayer 会并发使用多个 DataSource（嗅探 + 正式读取），
         // 而我们的 DataSource 是有状态的（各自持有 socket）。
         //
-        // 换成 IsoDataSourceFactory：它会先用一次 8 字节的 Range 判断「这条流装的是不是
-        // 光盘镜像（.iso / BDMV）」。不是就原样透传给 EmbyHttpDataSource，行为和以前
-        // 一模一样；是的话就在客户端里把 BDMV/STREAM 的正片 m2ts 解出来、
+        // 用第一次取流的响应前缀检查光盘镜像。识别到 UDF 后解析 BDMV/STREAM 正片，
         // 剥掉 192→188 的包壳，当成普通 TS 流喂给 ExoPlayer（见 net/IsoPlayback.kt）。
         //
         // ⚠️ 切集时这个 factory **必须重建**：url 是它的构造参数，
@@ -779,7 +771,7 @@ class PlayerActivity : Activity() {
         tvPause.visibility = View.GONE
         tvDiag.visibility = View.GONE
         tvError.visibility = View.GONE
-        hideSpeed()
+        hideSpeed(record = false)
     }
 
     /**
@@ -1021,10 +1013,13 @@ class PlayerActivity : Activity() {
         // 已经判定「硬解吃不下」时，界面归那条错误文案独占 —— 别再冒出「正在缓冲…」
         if (capabilityBlocked) return
         if (!speedVisible) {
-            peakBytesPerSec = 0L
             lastBytes = EmbyHttpDataSource.bytesRead()
             lastSampleAt = android.os.SystemClock.elapsedRealtime()
-            tvSpeed.text = "0.0 MB/s"
+            bufferingStartedAt = lastSampleAt
+            bufferingStartBytes = lastBytes
+            bufferingAfterFirstFrame = firstFrameRendered
+            lastBps = 0L
+            tvSpeed.text = "0 B/s"
         }
         tvSpeedHint.text = hint
         speedVisible = true
@@ -1034,8 +1029,18 @@ class PlayerActivity : Activity() {
     }
 
     /** 收起网速浮层（出第一帧 / 播放失败 / 退出时调用）。 */
-    private fun hideSpeed() {
+    private fun hideSpeed(record: Boolean = true) {
         if (!speedVisible) return
+        if (record) {
+            val sample = PlaybackSnapshot.BufferingSample(
+                afterFirstFrame = bufferingAfterFirstFrame,
+                waitMs = android.os.SystemClock.elapsedRealtime() - bufferingStartedAt,
+                downloadedBytes = (EmbyHttpDataSource.bytesRead() - bufferingStartBytes).coerceAtLeast(0L),
+                bufferedMediaMs = player?.totalBufferedDuration ?: 0L
+            )
+            PlaybackSnapshot.lastBuffering = sample
+            android.util.Log.i(TAG, "buffering $sample")
+        }
         speedVisible = false
         main.removeCallbacks(speedTick)
         boxSpeed.visibility = View.GONE
@@ -1059,21 +1064,6 @@ class PlayerActivity : Activity() {
     }
 
     /**
-     * 把字节数格式化成好读的大小（累计量用，和 [formatSpeed] 单位口径一致）。
-     */
-    private fun formatSize(bytes: Long): String {
-        if (bytes >= 1024L * 1024L * 1024L) {
-            val tenths = bytes * 10L / (1024L * 1024L * 1024L)
-            return "${tenths / 10}.${tenths % 10} GB"
-        }
-        if (bytes >= 1024L * 1024L) {
-            val tenths = bytes * 10L / (1024L * 1024L)
-            return "${tenths / 10}.${tenths % 10} MB"
-        }
-        return "${bytes / 1024L} KB"
-    }
-
-    /**
      * 播放 15 秒后检查：有视频轨但一帧都没出来，才算「解不了」。
      *
      * 判定依据是**实际有没有出画**，不是 MediaCodec 自报的能力 ——
@@ -1083,6 +1073,13 @@ class PlayerActivity : Activity() {
     private fun checkVideoStalled() {
         // capabilityBlocked：已经判过「硬解吃不下」并接管了界面，这里不能再刷另一套文案。
         if (firstFrameRendered || capabilityBlocked) return
+        val p = player ?: return
+        if (p.playbackState == Player.STATE_IDLE || p.playbackState == Player.STATE_ENDED) return
+        // 缓冲或暂停时还没有成功进入播放，不能据此判定硬解失败并摘掉视频层。
+        if (!p.isPlaying) {
+            main.postDelayed(stallCheck, 5_000L)
+            return
+        }
         stallRound++
 
         // ---- 第二轮：解码器建起来了，但 20 秒过去仍然一帧都没出 ----
@@ -1563,6 +1560,7 @@ class PlayerActivity : Activity() {
     }
 
     override fun onDestroy() {
+        hideSpeed()
         // 性能打点：退出这一刻才知道总共看了多久、掉了几帧。
         // 失败/网络断都在 PlayStats 内部静默处理，不会影响退出流程。
         PlayStats.finish(

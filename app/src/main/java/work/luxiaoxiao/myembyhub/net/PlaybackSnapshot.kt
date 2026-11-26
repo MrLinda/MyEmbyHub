@@ -29,6 +29,14 @@ object PlaybackSnapshot {
     @Volatile var firstFrame: Boolean = false
     @Volatile var errorCode: String = ""
     @Volatile var errorMessage: String = ""
+    @Volatile var lastBuffering: BufferingSample? = null
+
+    data class BufferingSample(
+        val afterFirstFrame: Boolean,
+        val waitMs: Long,
+        val downloadedBytes: Long,
+        val bufferedMediaMs: Long
+    )
 
     /** 开始播一个新条目时先清干净，否则会把上一条的报错带过来。 */
     fun reset(title: String, itemId: String) {
@@ -44,6 +52,7 @@ object PlaybackSnapshot {
         firstFrame = false
         errorCode = ""
         errorMessage = ""
+        lastBuffering = null
     }
 }
 
