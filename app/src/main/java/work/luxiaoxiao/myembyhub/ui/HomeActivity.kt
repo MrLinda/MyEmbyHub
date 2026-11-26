@@ -1575,7 +1575,7 @@ class HomeActivity : Activity() {
 
     private fun play(item: MediaItem, startMs: Long = item.resumeMs) {
         if (item.mediaSourceId.isNotEmpty()) {
-            startPlayer(item, item.mediaSourceId, startMs)
+            startPlayer(item, item.mediaSourceId, startMs, item.seriesId)
             return
         }
         val page = tabIndex
@@ -1589,17 +1589,23 @@ class HomeActivity : Activity() {
                 if (msId.isEmpty()) {
                     toast(friendlyError(r.exceptionOrNull() ?: IllegalStateException("没有可播放的媒体源")))
                 } else {
-                    startPlayer(item, msId, startMs)
+                    startPlayer(item, msId, startMs, detail?.seriesId.orEmpty().ifEmpty { item.seriesId })
                 }
             }
         }
     }
 
-    private fun startPlayer(item: MediaItem, mediaSourceId: String, startMs: Long) {
+    private fun startPlayer(
+        item: MediaItem,
+        mediaSourceId: String,
+        startMs: Long,
+        seriesId: String = item.seriesId
+    ) {
         val i = Intent(this, PlayerActivity::class.java)
         i.putExtra(PlayerActivity.EXTRA_URL, api.streamUrl(item, mediaSourceId))
         i.putExtra(PlayerActivity.EXTRA_TITLE, item.displayTitle())
         i.putExtra(PlayerActivity.EXTRA_ITEM_ID, item.id)
+        if (seriesId.isNotEmpty()) i.putExtra(PlayerActivity.EXTRA_SERIES_ID, seriesId)
         i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, mediaSourceId)
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
         startActivityForResult(i, REQ_PLAY)
@@ -1610,10 +1616,15 @@ class HomeActivity : Activity() {
         when (requestCode) {
             // 播完回来：刷新继续观看的进度
             REQ_PLAY -> if (pageReady[0] && tabIndex == 0) loadHome(focusFirst = false)
-            // 从详情页回来：详情页里可能播过东西，进度和「继续观看」都要重刷
+            // 从详情页回来：只有在详情页真播过片时才重刷进度和「继续观看」
             REQ_DETAIL -> {
-                if (pageReady[0]) loadHome(focusFirst = false)
-                if (pageReady[1] && tabIndex == 1) selectLibrary(libIndex, focusGrid = false)
+                val played = data?.getBooleanExtra(DetailActivity.EXTRA_PLAYED, false) == true
+                if (played) {
+                    if (pageReady[0]) loadHome(focusFirst = false)
+                    if (pageReady[1] && tabIndex == 1) selectLibrary(libIndex, focusGrid = false)
+                } else {
+                    pendingFocusItemId = null
+                }
             }
         }
     }

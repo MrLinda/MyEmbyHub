@@ -346,7 +346,7 @@ class EmbyApi(
     fun resume(limit: Int = 30): Result<List<MediaItem>> {
         return try {
             val resp = get(
-                "/Users/${uid()}/Items/Resume?MediaTypes=Video&Limit=$limit&Fields=$LIST_FIELDS"
+                "/Users/${uid()}/Items/Resume?MediaTypes=Video&Limit=$limit&Fields=$PLAYABLE_LIST_FIELDS"
             )
             Result.success(parseItems(resp.body))
         } catch (e: Throwable) {

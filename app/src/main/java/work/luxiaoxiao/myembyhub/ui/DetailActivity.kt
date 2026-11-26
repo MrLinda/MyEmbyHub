@@ -22,7 +22,9 @@ import work.luxiaoxiao.myembyhub.net.ImageLoader
 import work.luxiaoxiao.myembyhub.net.MediaItem
 import work.luxiaoxiao.myembyhub.net.Session
 import work.luxiaoxiao.myembyhub.net.friendlyError
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /**
  * 详情页：海报 + 标题 + 硬信息 + 简介 + 播放按钮 + （剧集才有）选集。
@@ -41,7 +43,12 @@ import java.util.concurrent.Executors
 class DetailActivity : Activity() {
 
     private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor()
+    private val worker = ThreadPoolExecutor(1, 1, 30L, TimeUnit.SECONDS, LinkedBlockingQueue()) { r ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            r.run()
+        }, "detail-worker").apply { isDaemon = true }
+    }.apply { allowCoreThreadTimeOut(true) }
 
     private lateinit var session: Session
     private lateinit var api: EmbyApi
@@ -146,8 +153,8 @@ class DetailActivity : Activity() {
             val er = api.episodes(d.id)
             val list = er.getOrNull()
             // 「该看的那一集」单独问一次 —— Emby 的 NextUp 已经把
-            // 「没看完的优先 → 下一集 → 第一集」这套逻辑算好了，客户端不用自己推。
-            val next = api.nextUp(d.id).getOrNull() ?: api.firstEpisode(d.id).getOrNull()
+            // 「没看完的优先 → 下一集 → 第一集」这套逻辑算好了；拿不到直接用列表第一集，省掉一次请求。
+            val next = api.nextUp(d.id).getOrNull() ?: list?.firstOrNull()
             main.post { bindEpisodes(list.orEmpty(), next) }
         }
     }
@@ -288,9 +295,9 @@ class DetailActivity : Activity() {
         }
     }
 
-    /** 没有剧照就用海报顶替（alpha 调低，免得跟正文抢）。 */
+    /** 没有剧照就复用 400px 海报顶替（alpha 调低，既命中缓存又省掉 4.9MB 内存）。 */
     private fun loadFallbackBackdrop(posterId: String) {
-        ImageLoader.get(this).load(posterId, "Primary", BACKDROP_WIDTH) { bmp ->
+        ImageLoader.get(this).load(posterId, "Primary", POSTER_WIDTH) { bmp ->
             main.post {
                 if (bmp == null) return@post
                 imgBackdrop.setImageBitmap(bmp)
@@ -389,6 +396,8 @@ class DetailActivity : Activity() {
         i.putExtra(PlayerActivity.EXTRA_URL, api.streamUrl(item, mediaSourceId))
         i.putExtra(PlayerActivity.EXTRA_TITLE, item.displayTitle())
         i.putExtra(PlayerActivity.EXTRA_ITEM_ID, item.id)
+        val sid = if (item.seriesId.isNotEmpty()) item.seriesId else seriesId
+        if (sid.isNotEmpty()) i.putExtra(PlayerActivity.EXTRA_SERIES_ID, sid)
         i.putExtra(PlayerActivity.EXTRA_MEDIA_SOURCE_ID, mediaSourceId)
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
         // 详情页手里已经有整季的剧集列表，直接传给播放器 ——
@@ -410,8 +419,9 @@ class DetailActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        // 播完回来：进度变了，「该看的那一集」和「继续播放 12:34」都得重算。
+        // 播完回来：进度变了，「该看的那一集」和「继续播放 12:34」都得重算，并通知首页刷新。
         if (requestCode == REQ_PLAY) {
+            setResult(RESULT_OK, Intent().putExtra(EXTRA_PLAYED, true))
             worker.execute { loadDetail() }
         }
     }
@@ -474,6 +484,16 @@ class DetailActivity : Activity() {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        ImageLoader.get(this).trimMemory(level)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        ImageLoader.get(this).clearMemCache()
+    }
+
     override fun onDestroy() {
         worker.shutdownNow()
         super.onDestroy()
@@ -484,10 +504,11 @@ class DetailActivity : Activity() {
         const val EXTRA_ITEM_NAME = "detail_item_name"
         const val EXTRA_ITEM_TYPE = "detail_item_type"
         const val EXTRA_SERIES_ID = "detail_series_id"
+        const val EXTRA_PLAYED = "detail_played"
 
         private const val REQ_PLAY = 3001
         private const val POSTER_WIDTH = 400
-        private const val BACKDROP_WIDTH = 1280
+        private const val BACKDROP_WIDTH = 800
 
         /** 简介最多留多少个字（多行 ellipsize 在老系统上不可靠，见 bindDetail）。 */
         private const val OVERVIEW_MAX = 220

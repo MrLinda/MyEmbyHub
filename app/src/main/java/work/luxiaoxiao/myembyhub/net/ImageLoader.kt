@@ -1,5 +1,6 @@
 package work.luxiaoxiao.myembyhub.net
 
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -399,6 +400,22 @@ class ImageLoader private constructor(private val ctx: Context) {
             try { File(diskDir, e.key).delete() } catch (ignored: Throwable) {}
             diskBytes -= e.value
             it.remove()
+        }
+    }
+
+    /** 释放内存位图缓存（保留磁盘缓存），给播放器腾出堆空间。 */
+    fun clearMemCache() {
+        memCache.evictAll()
+    }
+
+    /** 响应系统内存紧张回调，按级别缩减或清空内存缓存。 */
+    fun trimMemory(level: Int) {
+        when {
+            level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE ||
+                level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> memCache.evictAll()
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE ->
+                memCache.trimToSize(memCache.maxSize() / 2)
         }
     }
 

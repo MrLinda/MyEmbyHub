@@ -14,6 +14,7 @@ import work.luxiaoxiao.myembyhub.net.EmbyApi
 import work.luxiaoxiao.myembyhub.net.EmbyHttpDataSource
 import work.luxiaoxiao.myembyhub.net.EpisodeRef
 import work.luxiaoxiao.myembyhub.net.ErrorLog
+import work.luxiaoxiao.myembyhub.net.ImageLoader
 import work.luxiaoxiao.myembyhub.net.IsoDataSourceFactory
 import work.luxiaoxiao.myembyhub.net.MediaItem
 import work.luxiaoxiao.myembyhub.net.PlaybackSnapshot
@@ -29,7 +30,9 @@ import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector
 import com.google.android.exoplayer2.video.VideoSize
 import java.util.UUID
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /**
  * 播放页。
@@ -124,6 +127,9 @@ class PlayerActivity : Activity() {
 
     /** 后台正在拉剧集列表 —— 用户此时按上下键要看到「正在取…」而不是「没有上一集」。 */
     private var episodesLoading = false
+    private var initialItemId = ""
+    private var initialSeriesId = ""
+    private var episodesLoadStarted = false
 
     /**
      * 播放器自己的 TrackSelector，字幕开关要改它的参数（`setTrackTypeDisabled`）。
@@ -142,7 +148,19 @@ class PlayerActivity : Activity() {
     private var consumedKey = -1
 
     /** 加载类后台任务（补取 mediaSourceId / 拉剧集列表），和上报线程分开。 */
-    private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "play-load") }
+    private val worker = newBackgroundSingleExecutor("play-load")
+
+    private fun newBackgroundSingleExecutor(name: String): ThreadPoolExecutor =
+        ThreadPoolExecutor(1, 1, 30L, TimeUnit.SECONDS, LinkedBlockingQueue()) { r ->
+            Thread({
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                r.run()
+            }, name).apply { isDaemon = true }
+        }.apply { allowCoreThreadTimeOut(true) }
+
+    /** 左右键防抖后的目标 seek 位置（-1 = 没有待提交的 seek）。 */
+    private var pendingSeekMs: Long = -1L
+    private val commitSeek = Runnable { flushPendingSeek() }
 
     /** 「迟迟没有第一帧」的兜底检查。做成字段才能 removeCallbacks（切集时旧集的必须撤掉）。 */
     private val stallCheck = object : Runnable {
@@ -158,13 +176,22 @@ class PlayerActivity : Activity() {
      */
     private fun togglePlayPause() {
         val p = player ?: return
+        flushPendingSeek()
         // 播到结尾时按确定 = 从头重播，而不是「暂停一个已经停住的画面」
         if (p.playbackState == com.google.android.exoplayer2.Player.STATE_ENDED) {
             p.seekTo(0)
             p.playWhenReady = true
             return
         }
-        p.playWhenReady = !p.playWhenReady
+        val play = !p.playWhenReady
+        p.playWhenReady = play
+        if (!play) {
+            main.removeCallbacks(progressTick)
+            reportProgress(paused = true)
+        } else if (p.playbackState == Player.STATE_READY && !stopped) {
+            main.removeCallbacks(progressTick)
+            main.postDelayed(progressTick, PROGRESS_INTERVAL_MS)
+        }
         updatePauseBadge()
     }
 
@@ -269,11 +296,12 @@ class PlayerActivity : Activity() {
     private var lastBps = 0L
 
     /** 上报走单线程，别和 UI 抢主线程 */
-    private val reporter = Executors.newSingleThreadExecutor { r -> Thread(r, "play-report") }
+    private val reporter = newBackgroundSingleExecutor("play-report")
     private var api: EmbyApi? = null
     private var reportItem: MediaItem? = null
     private var playSessionId = UUID.randomUUID().toString().replace("-", "")
 
+    private var startReported = false
     private var stopped = false
 
     private val progressTick = object : Runnable {
@@ -311,6 +339,8 @@ class PlayerActivity : Activity() {
         val itemId = intent.getStringExtra(EXTRA_ITEM_ID) ?: ""
         val mediaSourceId = intent.getStringExtra(EXTRA_MEDIA_SOURCE_ID) ?: ""
         val startMs = intent.getLongExtra(EXTRA_START_MS, 0L)
+        initialItemId = itemId
+        initialSeriesId = intent.getStringExtra(EXTRA_SERIES_ID) ?: ""
 
         // 每播一个新条目先把快照清干净 —— 否则「上一部片播放失败」的报错
         // 会被当成「这一部片」的现场一起报上去，反馈就白填了。
@@ -332,10 +362,12 @@ class PlayerActivity : Activity() {
         }
 
         // 剧集列表：详情页会直接传进来；首页「继续观看」和媒体库直接起播的
-        // 入口手里没有，走后台补拉（见 loadEpisodeListAsync）。
+        // 入口手里没有，推迟到首帧渲染后再后台补拉（见 ensureEpisodeListLoaded），不和起播抢资源。
         episodes = EpisodeRef.decode(intent.getStringExtra(EXTRA_EPISODES))
         episodeIndex = episodes.indexOfFirst { it.id == itemId }
-        if (episodes.isEmpty() && itemId.isNotEmpty()) loadEpisodeListAsync(itemId)
+
+        // 先把后台海报内存缓存清掉，给 ExoPlayer 缓冲留足 96MB 堆空间（磁盘缓存仍在）。
+        ImageLoader.get(this).clearMemCache()
 
         // 30 秒是后台继续补缓冲的水位。首播和卡顿恢复的等待阈值单独设置。
         // ExoPlayer 的默认视频队列目标约 125 MiB，在 96 MiB 堆的老电视上留不下解码和 UI 的空间。
@@ -346,7 +378,7 @@ class PlayerActivity : Activity() {
             .setBufferDurationsMs(
                 30_000,  // 后台补缓冲的低水位
                 60_000,  // 缓冲时长上限，同时受字节目标约束
-                2_500,   // 起播或跳转后开播
+                1_200,   // 起播或跳转后开播
                 3_000    // 播放中断后恢复
             )
             .setTargetBufferBytes(bufferBytes)
@@ -568,6 +600,7 @@ class PlayerActivity : Activity() {
                     tvDiag.visibility = View.GONE
                     tvError.visibility = View.GONE
                     if (p.playbackState != Player.STATE_BUFFERING) hideSpeed()
+                    ensureEpisodeListLoaded()
                 }
             }
 
@@ -588,10 +621,10 @@ class PlayerActivity : Activity() {
                 // 重缓冲只在「已经出过画之后」才算（见 PlayStats.buffering 的注释）
                 PlayStats.buffering(state == Player.STATE_BUFFERING)
                 if (state == Player.STATE_READY && !stopped) {
-                    // 只在第一次 READY 时上报开始，并启动进度心跳
-                    reportStart()
+                    // 只在第一次 READY 时上报开始，并启动进度心跳（暂停时不空转心跳）
+                    if (!startReported) reportStart()
                     main.removeCallbacks(progressTick)
-                    main.postDelayed(progressTick, PROGRESS_INTERVAL_MS)
+                    if (p.playWhenReady) main.postDelayed(progressTick, PROGRESS_INTERVAL_MS)
                 }
                 if (state == Player.STATE_ENDED) {
                     endedNaturally = true
@@ -761,9 +794,12 @@ class PlayerActivity : Activity() {
         diagShown = false
         synchronized(diagLines) { diagLines.clear() }
         endedNaturally = false
+        startReported = false
         stopped = false
 
         main.removeCallbacks(stallCheck)
+        main.removeCallbacks(commitSeek)
+        pendingSeekMs = -1L
         main.removeCallbacks(hideSeekHint)
         main.removeCallbacks(hideInfo)
         main.removeCallbacks(progressTick)
@@ -784,6 +820,7 @@ class PlayerActivity : Activity() {
      *    用户按了没反应，只会以为遥控器坏了或者这个功能根本没做。
      */
     private fun switchEpisode(delta: Int) {
+        ensureEpisodeListLoaded()
         if (episodes.isEmpty()) {
             toast(
                 if (episodesLoading) "正在取剧集列表…"
@@ -959,20 +996,26 @@ class PlayerActivity : Activity() {
         prepareEpisode(a.streamUrl(item, mediaSourceId), ep.resumeMs)
     }
 
+    private fun ensureEpisodeListLoaded() {
+        if (episodes.isNotEmpty() || episodesLoadStarted || initialItemId.isEmpty()) return
+        episodesLoadStarted = true
+        loadEpisodeListAsync(initialItemId, initialSeriesId)
+    }
+
     /**
      * 后台把同剧的剧集列表拉回来（只有「没有传列表」的入口会走到）。
      *
      * 为什么要「条目详情 → seriesId → 剧集列表」两步：播放器手里只有 itemId，
      * 而 `MediaItem.seriesId` 只有在列表/详情接口带 `SeriesId` 字段时才有。
-     * 两步大约 1~2 秒，正好藏在起播缓冲里，用户察觉不到。
+     * 调用方若已经把 `seriesId` 传进来，就直接省掉第一步。
      *
      * 失败一律静默：拉不到就只是「没有切集功能」，正片照播。
      */
-    private fun loadEpisodeListAsync(itemId: String) {
+    private fun loadEpisodeListAsync(itemId: String, knownSeriesId: String = "") {
         val a = api ?: return
         episodesLoading = true
         worker.execute {
-            val sid = a.itemDetail(itemId).getOrNull()?.seriesId.orEmpty()
+            val sid = knownSeriesId.ifEmpty { a.itemDetail(itemId).getOrNull()?.seriesId.orEmpty() }
             val list = if (sid.isEmpty()) emptyList() else a.episodes(sid).getOrNull().orEmpty()
             main.post {
                 if (isFinishing || isDestroyed) return@post
@@ -1207,6 +1250,7 @@ class PlayerActivity : Activity() {
      * 诊断排最后 —— 它是给排障用的，正常用户不会碰。
      */
     private fun showPlayerMenu() {
+        ensureEpisodeListLoaded()
         val items = ArrayList<TvMenu.Item>()
 
         if (episodes.isEmpty()) {
@@ -1300,6 +1344,8 @@ class PlayerActivity : Activity() {
     }
 
     private fun reportStart() {
+        if (startReported) return
+        startReported = true
         val a = api ?: return
         val item = reportItem ?: return
         reporter.execute { a.reportStart(item, playSessionId) }
@@ -1455,17 +1501,14 @@ class PlayerActivity : Activity() {
                 return true
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-                // 长按连发时别一次跳十秒一跳十秒地堆上去 —— 按住不放就按 5 秒小步走
+                // 长按连发时别一次跳十秒一跳十秒地堆上去 —— 按住不放就按 5 秒小步走，停按再真正 seek
                 val step = if (event.repeatCount > 0) SEEK_STEP_SMALL_MS else SEEK_STEP_MS
-                p.seekTo((p.currentPosition - step).coerceAtLeast(0))
-                showSeekHint(-step)
+                stepSeek(-step)
                 return true
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
                 val step = if (event.repeatCount > 0) SEEK_STEP_SMALL_MS else SEEK_STEP_MS
-                val dur = if (p.duration > 0) p.duration else Long.MAX_VALUE
-                p.seekTo((p.currentPosition + step).coerceAtMost(dur))
-                showSeekHint(step)
+                stepSeek(step)
                 return true
             }
             // 上/下 = 上一集 / 下一集。
@@ -1498,6 +1541,28 @@ class PlayerActivity : Activity() {
         return false
     }
 
+    /** 连按/长按左右键时先累加目标位置并即时刷新提示，停按 350ms 再一次性 seek。 */
+    private fun stepSeek(deltaMs: Long) {
+        val p = player ?: return
+        val base = if (pendingSeekMs >= 0L) pendingSeekMs else p.currentPosition.coerceAtLeast(0L)
+        val dur = if (p.duration > 0) p.duration else Long.MAX_VALUE
+        val target = (base + deltaMs).coerceIn(0L, dur)
+        pendingSeekMs = target
+        showSeekHint(deltaMs, target, hideDelayMs = SEEK_DEBOUNCE_MS + SEEK_HINT_MS)
+        main.removeCallbacks(commitSeek)
+        main.postDelayed(commitSeek, SEEK_DEBOUNCE_MS)
+    }
+
+    private fun flushPendingSeek() {
+        val target = pendingSeekMs
+        if (target < 0L) return
+        pendingSeekMs = -1L
+        main.removeCallbacks(commitSeek)
+        player?.seekTo(target)
+        main.removeCallbacks(hideSeekHint)
+        main.postDelayed(hideSeekHint, SEEK_HINT_MS)
+    }
+
     /**
      * 按左右键拖动进度时给一行位置提示。
      *
@@ -1507,15 +1572,19 @@ class PlayerActivity : Activity() {
      *
      * @param deltaMs 本次跳的毫秒数（只用来决定箭头方向）
      */
-    private fun showSeekHint(deltaMs: Long) {
+    private fun showSeekHint(
+        deltaMs: Long,
+        targetMs: Long? = null,
+        hideDelayMs: Long = SEEK_HINT_MS
+    ) {
         val p = player ?: return
-        val pos = p.currentPosition.coerceAtLeast(0)
+        val pos = (targetMs ?: p.currentPosition).coerceAtLeast(0)
         val dur = if (p.duration > 0) p.duration else 0L
         val arrow = if (deltaMs < 0) "◀" else "▶"
         tvSeek.text = if (dur > 0) "$arrow  ${fmtTime(pos)} / ${fmtTime(dur)}" else "$arrow  ${fmtTime(pos)}"
         tvSeek.visibility = View.VISIBLE
         main.removeCallbacks(hideSeekHint)
-        main.postDelayed(hideSeekHint, SEEK_HINT_MS)
+        main.postDelayed(hideSeekHint, hideDelayMs)
     }
 
     /** 毫秒 → `mm:ss` / `h:mm:ss`。手算不用 `String.format`（4.3 上省一个 Formatter）。 */
@@ -1577,6 +1646,8 @@ class PlayerActivity : Activity() {
         main.removeCallbacks(progressTick)
         main.removeCallbacks(speedTick)
         main.removeCallbacks(stallCheck)
+        main.removeCallbacks(commitSeek)
+        pendingSeekMs = -1L
         main.removeCallbacks(hideSeekHint)
         main.removeCallbacks(hideInfo)
         reporter.shutdown()
@@ -1585,6 +1656,7 @@ class PlayerActivity : Activity() {
         try { worker.shutdownNow() } catch (ignored: Throwable) {}
         try { player?.release() } catch (ignored: Throwable) {}
         player = null
+        EmbyHttpDataSource.clearIdlePool()
         setResult(RESULT_OK)
         super.onDestroy()
     }
@@ -1619,6 +1691,7 @@ class PlayerActivity : Activity() {
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_ITEM_ID = "item_id"
+        const val EXTRA_SERIES_ID = "series_id"
         const val EXTRA_MEDIA_SOURCE_ID = "media_source_id"
         const val EXTRA_START_MS = "start_ms"
 
@@ -1631,7 +1704,7 @@ class PlayerActivity : Activity() {
         const val EXTRA_EPISODES = "episodes"
 
         /** 进度上报间隔。太密会在 4.3 上抢带宽/CPU，太疏则退出时丢进度。 */
-        private const val PROGRESS_INTERVAL_MS = 10_000L
+        private const val PROGRESS_INTERVAL_MS = 20_000L
 
         /** 网速采样间隔：0.5 秒。够跟手，也不会让老机器一直重绘。 */
         private const val SPEED_INTERVAL_MS = 500L
@@ -1641,6 +1714,9 @@ class PlayerActivity : Activity() {
 
         /** 按住不放时改跳 5 秒 —— 连发速度是 10 次/秒，按 10 秒跳会瞬间跑完整部片。 */
         private const val SEEK_STEP_SMALL_MS = 5_000L
+
+        /** 停按左右键后多久才真正向播放器提交 seek。 */
+        private const val SEEK_DEBOUNCE_MS = 350L
 
         /** seek 位置提示停留时长。 */
         private const val SEEK_HINT_MS = 1_200L
