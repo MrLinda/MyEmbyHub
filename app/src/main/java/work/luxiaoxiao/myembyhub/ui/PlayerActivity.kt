@@ -1709,9 +1709,15 @@ class PlayerActivity : Activity() {
     override fun onPause() {
         player?.playWhenReady = false
         main.removeCallbacks(progressTick)
+        main.removeCallbacks(deferredProgress)
         // 退到后台就别再采样了，省电
         main.removeCallbacks(speedTick)
-        reportProgress(paused = true, eventName = "Pause")
+        // 正在退出（按返回键）时不发 Pause，避免几十毫秒后 onDestroy 再发 Stopped 形成连续双包
+        if (!isFinishing) {
+            reportProgress(paused = true, eventName = "Pause")
+        } else {
+            pendingProgress = null
+        }
         super.onPause()
     }
 
@@ -1814,8 +1820,8 @@ class PlayerActivity : Activity() {
         /** 进度上报间隔。太密会在 4.3 上抢带宽/CPU，太疏则退出时丢进度。 */
         private const val PROGRESS_INTERVAL_MS = 20_000L
 
-        /** 两次 Progress 上报之间的硬最小间隔，彻底杜绝快速切暂停/快进打爆服务端数据库。 */
-        private const val PROGRESS_MIN_INTERVAL_MS = 3_000L
+        /** 两次 Progress 上报之间的硬最小间隔（5 秒），彻底杜绝短间隔打爆服务端数据库。 */
+        private const val PROGRESS_MIN_INTERVAL_MS = 5_000L
 
         /** 网速采样间隔：0.5 秒。够跟手，也不会让老机器一直重绘。 */
         private const val SPEED_INTERVAL_MS = 500L

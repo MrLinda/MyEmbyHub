@@ -371,7 +371,7 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
               "versionName": "$name",
               "url": "$apkDownloadUrl",
               "size": ${apk.length()},
-              "notes": "全面对齐 Emby 标准协议：持久化每设备唯一 DeviceId、规范 X-Emby-Authorization 鉴权头、退出登录调用 POST /Sessions/Logout；302 跳转至异域直链/网盘时自动剥离 Emby 凭据。\\n\\nPlaybackInfo 与播放上报修复：补全请求参数与 SubtitleProfiles，尊重服务端 ErrorCode/拒绝响应不再绕过硬拉流，支持 DirectStream / DirectPlay（含容器后缀与外链）/ Transcode 判定；严格按 Playing → Progress → Stopped 状态机上报（未起播绝不上报 Stopped/Progress 防止清零续播进度），补齐 EventName 与真实起播位置。\\n\\n搜索与图片修复：搜索改用标准 IncludeItemTypes 保留电视剧结果，修复首集排序与图片 tag 缓存。"
+              "notes": "全面对齐 Emby 标准协议：持久化每设备唯一 DeviceId、规范 X-Emby-Authorization 鉴权头、退出登录调用 POST /Sessions/Logout；302 跳转至异域直链/网盘时自动剥离 Emby 凭据。\\n\\nPlaybackInfo 与播放上报防连发：补全请求参数与 SubtitleProfiles，尊重服务端 ErrorCode/拒绝响应不再绕过硬拉流；严格按 Playing → Progress → Stopped 状态机上报（未起播不发 Stopped/Progress 防止清零续播进度），常规心跳 20 秒一次、任意两次进度上报硬保 ≥5 秒合并节流、返回退出不再连发 Pause+Stopped。\\n\\n搜索与图片修复：搜索改用标准 IncludeItemTypes 保留电视剧结果，修复首集排序与图片 tag 缓存。"
             }
             """.trimIndent()
         )
