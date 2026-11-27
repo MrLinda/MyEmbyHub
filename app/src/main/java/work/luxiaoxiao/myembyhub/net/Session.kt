@@ -33,6 +33,20 @@ class Session private constructor(private val sp: SharedPreferences) {
         get() = sp.getString(KEY_USER_ID, "") ?: ""
         set(v) = sp.edit().putString(KEY_USER_ID, v).apply()
 
+    /**
+     * 每台设备唯一的 Emby DeviceId（首次读取时生成并持久化）。
+     *
+     * Emby 服务端按 DeviceId 区分设备会话；固定常量会导致多台设备互相顶号、串进度。
+     */
+    val deviceId: String
+        get() {
+            val existing = sp.getString(KEY_DEVICE_ID, "")
+            if (!existing.isNullOrEmpty()) return existing
+            val created = java.util.UUID.randomUUID().toString().replace("-", "")
+            sp.edit().putString(KEY_DEVICE_ID, created).apply()
+            return created
+        }
+
     var username: String
         get() = sp.getString(KEY_USER, "") ?: ""
         set(v) = sp.edit().putString(KEY_USER, v).apply()
@@ -152,6 +166,7 @@ class Session private constructor(private val sp: SharedPreferences) {
         private const val KEY_TOKEN = "token"
         private const val KEY_USER = "username"
         private const val KEY_USER_ID = "user_id"
+        private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_PASS = "password"
         private const val KEY_REMEMBER_PASS = "remember_password"
         private const val KEY_UPDATE_URL = "update_manifest_url"

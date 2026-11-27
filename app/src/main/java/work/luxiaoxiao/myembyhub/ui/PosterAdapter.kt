@@ -148,8 +148,9 @@ class PosterAdapter(
         //    什么也不画，占位字自然透出来；有图时整张盖住。所以根本不需要切可见性。
 
         if (posterId.isNotEmpty()) {
+            val tag = if (item.type == "Episode") "" else item.primaryImageTag
             holder.request = ImageLoader.get(holder.itemView.context)
-                .load(posterId, "Primary", POSTER_WIDTH) { bmp ->
+                .load(posterId, "Primary", POSTER_WIDTH, tag = tag) { bmp ->
                     // 回调回来时 holder 可能已经绑了别的条目
                     if (holder.itemId == item.id && bmp != null) {
                         holder.poster.setImageBitmap(bmp)

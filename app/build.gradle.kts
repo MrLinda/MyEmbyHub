@@ -371,7 +371,7 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
               "versionName": "$name",
               "url": "$apkDownloadUrl",
               "size": ${apk.length()},
-              "notes": "播放协议对齐标准 Emby：起播与切集改走 POST PlaybackInfo 协商（支持 DirectStreamUrl / smartstrm 302 媒体源），修复部分服务端串片问题；规范媒体库/搜索接口路径并补齐下一集兜底与 HTTP 登录兼容。\\n\\n继续观看菜单：在「继续观看」项按菜单键（或长按确认键）可添加到收藏夹/取消收藏、标记为已观看、标记为未观看或移除观看记录。\\n\\n登录与 401 体验修复：登录悬浮窗支持关闭，未登录或登录态过期时可在首页打开登录或直接进设置检查更新；补齐播放页/详情页/翻页 401 自动触发重登与遥控器焦点恢复。"
+              "notes": "全面对齐 Emby 标准协议：持久化每设备唯一 DeviceId、规范 X-Emby-Authorization 鉴权头、退出登录调用 POST /Sessions/Logout；302 跳转至异域直链/网盘时自动剥离 Emby 凭据。\\n\\nPlaybackInfo 与播放上报修复：补全请求参数与 SubtitleProfiles，尊重服务端 ErrorCode/拒绝响应不再绕过硬拉流，支持 DirectStream / DirectPlay（含容器后缀与外链）/ Transcode 判定；严格按 Playing → Progress → Stopped 状态机上报（未起播绝不上报 Stopped/Progress 防止清零续播进度），补齐 EventName 与真实起播位置。\\n\\n搜索与图片修复：搜索改用标准 IncludeItemTypes 保留电视剧结果，修复首集排序与图片 tag 缓存。"
             }
             """.trimIndent()
         )

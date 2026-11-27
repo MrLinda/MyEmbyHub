@@ -374,11 +374,12 @@ class EmbyHttpDataSource(
     // ==================== 内部实现 ====================
 
     private fun followRedirects(original: String, spec: DataSpec): Pair<String, HttpResponse> {
+        val originParts = UrlKit.parse(original)
         var url = original
         var redirects = 0
         while (true) {
             val hop = if (redirects == 0) "origin" else "redirect"
-            val resp = request(url, spec.position, spec.length, spec.httpRequestHeaders, hop)
+            val resp = request(url, spec.position, spec.length, spec.httpRequestHeaders, hop, originParts)
             if (resp.code !in 300..399) return url to resp
             var recycled = false
             try {
@@ -428,8 +429,9 @@ class EmbyHttpDataSource(
         if (cached.original != original || cached.requestHeaders != spec.httpRequestHeaders ||
             age >= REDIRECT_TTL_MS
         ) return null
+        val originParts = UrlKit.parse(original)
         val resp = try {
-            request(cached.target, spec.position, spec.length, spec.httpRequestHeaders, "cached")
+            request(cached.target, spec.position, spec.length, spec.httpRequestHeaders, "cached", originParts)
         } catch (_: IOException) {
             null
         }
@@ -487,9 +489,11 @@ class EmbyHttpDataSource(
         position: Long,
         length: Long,
         extraHeaders: Map<String, String>?,
-        hop: String
+        hop: String,
+        originParts: UrlKit.Parts
     ): HttpResponse {
         val u = UrlKit.parse(urlStr)
+        val attachAuth = shouldAttachEmbyAuth(originParts, u)
         val initialEmbyRequest = !attemptedInitialEmbyRequest && hop == "origin" && position == 0L &&
             length == C.LENGTH_UNSET.toLong()
         if (initialEmbyRequest) attemptedInitialEmbyRequest = true
@@ -497,17 +501,22 @@ class EmbyHttpDataSource(
         // 这种情况下第一次写/读会抛异常，换条新连接重试一次即可 —— 不值得让用户看到报错。
         var reused = false
         try {
-            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = true, initialEmbyRequest = initialEmbyRequest) {
+            return requestOnce(
+                u, position, length, extraHeaders, hop,
+                allowReuse = true,
+                attachAuth = attachAuth,
+                initialEmbyRequest = initialEmbyRequest
+            ) {
                 reused = it
             }
         } catch (e: InitialResponseTimeout) {
             // 只提前重试首次 Emby 请求的首包超时，重试沿用正常超时给慢服务器留足时间。
             Log.i(TAG, "首个 Emby 请求没有返回响应，换新连接重试")
-            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = false) {}
+            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = false, attachAuth = attachAuth) {}
         } catch (e: IOException) {
             if (!reused) throw e
             Log.i(TAG, "复用的连接已失效，换新连接重试：${e.message}")
-            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = false) {}
+            return requestOnce(u, position, length, extraHeaders, hop, allowReuse = false, attachAuth = attachAuth) {}
         }
     }
 
@@ -546,6 +555,7 @@ class EmbyHttpDataSource(
         extraHeaders: Map<String, String>?,
         hop: String,
         allowReuse: Boolean,
+        attachAuth: Boolean,
         initialEmbyRequest: Boolean = false,
         onReuse: (Boolean) -> Unit
     ): HttpResponse {
@@ -565,11 +575,10 @@ class EmbyHttpDataSource(
             s.soTimeout = READ_TIMEOUT_MS
             val sb = StringBuilder()
             sb.append("GET ").append(path).append(if (query != null) "?$query" else "").append(" HTTP/1.1\r\n")
-            // ⚠️ Host 头**不能带默认端口**。
-            // 2026-11-03 真机实测：写成 `Host: v10.example.com:443` 时 openresty
-            // 匹配不到 server_name → 直接回 404；写成 `Host: v10.example.com` 才正常。
+            // ⚠️ Host 头**不能带默认端口**（https:443 / http:80），非默认端口必须保留。
             sb.append("Host: ").append(host)
-            if (port != 443 && port != 80) sb.append(':').append(port)
+            val isDefaultPort = (u.scheme == "https" && port == 443) || (u.scheme == "http" && port == 80)
+            if (!isDefaultPort) sb.append(':').append(port)
             sb.append("\r\n")
             sb.append("User-Agent: ").append(userAgent).append("\r\n")
             sb.append("Accept: */*\r\n")
@@ -582,11 +591,11 @@ class EmbyHttpDataSource(
             //    ExoPlayer 就不知道媒体总长（时长/进度条会错），也无法 seek。
             val rangeEnd = if (length == -1L) "" else (position + length - 1).toString()
             sb.append("Range: bytes=").append(position).append('-').append(rangeEnd).append("\r\n")
-            if (token.isNotEmpty()) sb.append("X-Emby-Token: ").append(token).append("\r\n")
-            sb.append(
-                "X-Emby-Authorization: MediaBrowser Client=\"MyEmbyHub\", Device=\"TV\", " +
-                    "DeviceId=\"myembyhub-tv\", Version=\"1.0.0\"\r\n"
-            )
+            // 仅同源且未降级时附带 Emby 鉴权头，避免 302 到第三方网盘/对象存储时泄漏 token 或触发签名拒收
+            if (attachAuth) {
+                if (token.isNotEmpty()) sb.append("X-Emby-Token: ").append(token).append("\r\n")
+                sb.append("X-Emby-Authorization: ").append(EmbyApi.authHeader(ctx, token)).append("\r\n")
+            }
             extraHeaders?.forEach { (k, v) -> sb.append(k).append(": ").append(v).append("\r\n") }
             sb.append("\r\n")
 
@@ -753,4 +762,17 @@ class EmbyHttpDataSource(
     } catch (e: Throwable) {
         "(未知)"
     }
+}
+
+/**
+ * 是否允许把 Emby 鉴权头（`X-Emby-Token` / `X-Emby-Authorization`）发给目标地址。
+ *
+ * 严格遵循同源原则：仅当 host、port 相同且未发生 https → http 降级时才附带，
+ * 避免 302 跳转到第三方网盘 / 对象存储 / 异域 CDN 时泄漏凭据或导致签名校验失败。
+ */
+internal fun shouldAttachEmbyAuth(origin: UrlKit.Parts, target: UrlKit.Parts): Boolean {
+    if (!origin.host.equals(target.host, ignoreCase = true)) return false
+    if (origin.port != target.port) return false
+    if (origin.scheme == "https" && target.scheme != "https") return false
+    return true
 }

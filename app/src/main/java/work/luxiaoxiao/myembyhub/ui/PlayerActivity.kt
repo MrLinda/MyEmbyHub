@@ -188,8 +188,9 @@ class PlayerActivity : Activity() {
         p.playWhenReady = play
         if (!play) {
             main.removeCallbacks(progressTick)
-            reportProgress(paused = true)
+            reportProgress(paused = true, eventName = "Pause")
         } else if (p.playbackState == Player.STATE_READY && !stopped) {
+            reportProgress(paused = false, eventName = "Unpause")
             main.removeCallbacks(progressTick)
             main.postDelayed(progressTick, PROGRESS_INTERVAL_MS)
         }
@@ -301,14 +302,30 @@ class PlayerActivity : Activity() {
     private var api: EmbyApi? = null
     private var reportItem: MediaItem? = null
     private var playSessionId = UUID.randomUUID().toString().replace("-", "")
+    private var playMethod = "DirectPlay"
+    private var currentStartMs = 0L
 
     private var startReported = false
     private var stopped = false
+    /** 上一次发出 Playing/Progress 的单调时钟（用于强制限制两次 Progress 最小间隔）。 */
+    private var lastReportSentAt = 0L
+    private var pendingProgress: PendingProgress? = null
+
+    private data class PendingProgress(
+        val paused: Boolean,
+        val eventName: String,
+        val overrideTicks: Long?
+    )
+
+    private val deferredProgress = Runnable {
+        val pending = pendingProgress ?: return@Runnable
+        pendingProgress = null
+        sendProgressNow(pending.paused, pending.eventName, pending.overrideTicks)
+    }
 
     private val progressTick = object : Runnable {
         override fun run() {
-            reportProgress(paused = false)
-            main.postDelayed(this, PROGRESS_INTERVAL_MS)
+            reportProgress(paused = false, eventName = "TimeUpdate")
         }
     }
 
@@ -339,12 +356,16 @@ class PlayerActivity : Activity() {
         val token = session.token
         val itemId = intent.getStringExtra(EXTRA_ITEM_ID) ?: ""
         val mediaSourceId = intent.getStringExtra(EXTRA_MEDIA_SOURCE_ID) ?: ""
-        val startMs = intent.getLongExtra(EXTRA_START_MS, 0L)
+        val startMs = intent.getLongExtra(EXTRA_START_MS, 0L).coerceAtLeast(0L)
+        currentStartMs = startMs
         initialItemId = itemId
         initialSeriesId = intent.getStringExtra(EXTRA_SERIES_ID) ?: ""
         playSessionId = intent.getStringExtra(EXTRA_PLAY_SESSION_ID)
             ?.takeIf { it.isNotEmpty() }
             ?: UUID.randomUUID().toString().replace("-", "")
+        playMethod = intent.getStringExtra(EXTRA_PLAY_METHOD)
+            ?.takeIf { it.isNotEmpty() }
+            ?: "DirectPlay"
 
         // 每播一个新条目先把快照清干净 —— 否则「上一部片播放失败」的报错
         // 会被当成「这一部片」的现场一起报上去，反馈就白填了。
@@ -361,7 +382,8 @@ class PlayerActivity : Activity() {
                 name = title,
                 type = "Episode",
                 isFolder = false,
-                mediaSourceId = mediaSourceId
+                mediaSourceId = mediaSourceId,
+                positionTicks = startMs * 10_000L
             )
         }
 
@@ -632,7 +654,7 @@ class PlayerActivity : Activity() {
                 }
                 if (state == Player.STATE_ENDED) {
                     endedNaturally = true
-                    reportStop()
+                    reportStop(ended = true)
                     // 播完自动接下一集。放 post 里是为了先让 ENDED 这一帧的
                     // 状态回调全部跑完，再拆播放源 —— 在回调栈里直接
                     // setMediaSource 会让 ExoPlayer 自己重入。
@@ -801,6 +823,8 @@ class PlayerActivity : Activity() {
         endedNaturally = false
         startReported = false
         stopped = false
+        lastReportSentAt = 0L
+        pendingProgress = null
 
         main.removeCallbacks(stallCheck)
         main.removeCallbacks(commitSeek)
@@ -808,6 +832,7 @@ class PlayerActivity : Activity() {
         main.removeCallbacks(hideSeekHint)
         main.removeCallbacks(hideInfo)
         main.removeCallbacks(progressTick)
+        main.removeCallbacks(deferredProgress)
         tvSeek.visibility = View.GONE
         tvPause.visibility = View.GONE
         tvDiag.visibility = View.GONE
@@ -972,7 +997,7 @@ class PlayerActivity : Activity() {
             mediaSourceId = ep.mediaSourceId
         )
         worker.execute {
-            val res = a.resolvePlayback(stub, ep.mediaSourceId)
+            val res = a.resolvePlayback(stub, ep.mediaSourceId, ep.resumeMs * 10_000L)
             val plan = res.getOrNull()
             main.post {
                 if (isFinishing || isDestroyed) return@post
@@ -994,16 +1019,19 @@ class PlayerActivity : Activity() {
     /** 真正把某一集的流喂给播放器（已通过 PlaybackInfo 协商好地址）。 */
     private fun startEpisodeStream(ep: EpisodeRef, plan: work.luxiaoxiao.myembyhub.net.PlaybackPlan) {
         val title = ep.label()
+        currentStartMs = ep.resumeMs.coerceAtLeast(0L)
         val item = MediaItem(
             id = ep.id,
             name = title,
             type = "Episode",
             isFolder = false,
-            mediaSourceId = plan.mediaSourceId
+            mediaSourceId = plan.mediaSourceId,
+            positionTicks = currentStartMs * 10_000L
         )
         reportItem = item
-        // 每一集都是新的 Emby 播放会话，优先沿用 PlaybackInfo 返回的 PlaySessionId
+        // 每一集都是新的 Emby 播放会话，优先沿用 PlaybackInfo 返回的 PlaySessionId 与 PlayMethod
         playSessionId = plan.playSessionId.ifEmpty { UUID.randomUUID().toString().replace("-", "") }
+        playMethod = plan.playMethod.ifEmpty { "DirectPlay" }
         // 现场快照与打点都按「新的一集」重来
         PlaybackSnapshot.reset(title, ep.id)
         PlayStats.begin(this, title, ep.id)
@@ -1361,26 +1389,67 @@ class PlayerActivity : Activity() {
     private fun reportStart() {
         if (startReported) return
         startReported = true
+        lastReportSentAt = android.os.SystemClock.elapsedRealtime()
         val a = api ?: return
         val item = reportItem ?: return
-        reporter.execute { a.reportStart(item, playSessionId) }
+        val posTicks = currentTicks().let { if (it > 0L) it else currentStartMs * 10_000L }
+        val sid = playSessionId
+        val method = playMethod
+        reporter.execute { a.reportStart(item, posTicks, sid, method) }
     }
 
-    private fun reportProgress(paused: Boolean) {
+    private fun reportProgress(
+        paused: Boolean,
+        eventName: String = if (paused) "Pause" else "TimeUpdate",
+        overrideTicks: Long? = null
+    ) {
+        // 严格遵守 Emby 会话状态机：未上报 Playing 之前绝不发 Progress
+        if (!startReported || stopped) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val elapsed = now - lastReportSentAt
+        if (lastReportSentAt > 0L && elapsed < PROGRESS_MIN_INTERVAL_MS) {
+            // 距上次上报不足最小间隔：合并为一条延迟上报，既杜绝短间隔打爆服务端，又不丢最终状态
+            pendingProgress = PendingProgress(paused, eventName, overrideTicks)
+            main.removeCallbacks(deferredProgress)
+            main.postDelayed(deferredProgress, PROGRESS_MIN_INTERVAL_MS - elapsed)
+            return
+        }
+        sendProgressNow(paused, eventName, overrideTicks)
+    }
+
+    private fun sendProgressNow(paused: Boolean, eventName: String, overrideTicks: Long?) {
+        if (!startReported || stopped) return
+        main.removeCallbacks(deferredProgress)
+        pendingProgress = null
+        lastReportSentAt = android.os.SystemClock.elapsedRealtime()
+        // 播放中每次上报完都顺延下一次 20s 心跳，避免 seek/Unpause 刚报完紧接着撞上定时 tick
+        main.removeCallbacks(progressTick)
+        if (!paused && player?.playWhenReady == true && !stopped) {
+            main.postDelayed(progressTick, PROGRESS_INTERVAL_MS)
+        }
         val a = api ?: return
         val item = reportItem ?: return
-        val ticks = currentTicks()
-        reporter.execute { a.reportProgress(item, ticks, paused, playSessionId) }
+        val ticks = (overrideTicks ?: currentTicks()).coerceAtLeast(0L)
+        val sid = playSessionId
+        val method = playMethod
+        reporter.execute { a.reportProgress(item, ticks, paused, sid, eventName, method) }
     }
 
-    private fun reportStop() {
+    private fun reportStop(ended: Boolean = false) {
         if (stopped) return
         stopped = true
         main.removeCallbacks(progressTick)
+        main.removeCallbacks(deferredProgress)
+        pendingProgress = null
+        // 未真正起播过就退出时绝不发 Stopped，避免把服务端原本的续播进度清零
+        if (!startReported) return
         val a = api ?: return
         val item = reportItem ?: return
-        val ticks = currentTicks()
-        reporter.execute { a.reportStopped(item, ticks, playSessionId) }
+        val durationMs = player?.duration ?: 0L
+        val ticks = if (ended && durationMs > 0L) durationMs * 10_000L else currentTicks()
+        val sid = playSessionId
+        val method = playMethod
+        reporter.execute { a.reportStopped(item, ticks, sid, method) }
     }
 
     /**
@@ -1574,6 +1643,11 @@ class PlayerActivity : Activity() {
         pendingSeekMs = -1L
         main.removeCallbacks(commitSeek)
         player?.seekTo(target)
+        reportProgress(
+            paused = player?.playWhenReady == false,
+            eventName = "TimeUpdate",
+            overrideTicks = target * 10_000L
+        )
         main.removeCallbacks(hideSeekHint)
         main.postDelayed(hideSeekHint, SEEK_HINT_MS)
     }
@@ -1637,7 +1711,7 @@ class PlayerActivity : Activity() {
         main.removeCallbacks(progressTick)
         // 退到后台就别再采样了，省电
         main.removeCallbacks(speedTick)
-        reportProgress(paused = true)
+        reportProgress(paused = true, eventName = "Pause")
         super.onPause()
     }
 
@@ -1645,6 +1719,7 @@ class PlayerActivity : Activity() {
         super.onResume()
         if (!stopped && player != null) {
             player?.playWhenReady = true
+            reportProgress(paused = false, eventName = "Unpause")
             main.removeCallbacks(progressTick)
             main.postDelayed(progressTick, PROGRESS_INTERVAL_MS)
             // 还没出画（仍在缓冲）时，把网速采样接上
@@ -1673,6 +1748,8 @@ class PlayerActivity : Activity() {
         )
         reportStop()
         main.removeCallbacks(progressTick)
+        main.removeCallbacks(deferredProgress)
+        pendingProgress = null
         main.removeCallbacks(speedTick)
         main.removeCallbacks(stallCheck)
         main.removeCallbacks(commitSeek)
@@ -1723,6 +1800,7 @@ class PlayerActivity : Activity() {
         const val EXTRA_SERIES_ID = "series_id"
         const val EXTRA_MEDIA_SOURCE_ID = "media_source_id"
         const val EXTRA_PLAY_SESSION_ID = "play_session_id"
+        const val EXTRA_PLAY_METHOD = "play_method"
         const val EXTRA_START_MS = "start_ms"
 
         /**
@@ -1735,6 +1813,9 @@ class PlayerActivity : Activity() {
 
         /** 进度上报间隔。太密会在 4.3 上抢带宽/CPU，太疏则退出时丢进度。 */
         private const val PROGRESS_INTERVAL_MS = 20_000L
+
+        /** 两次 Progress 上报之间的硬最小间隔，彻底杜绝快速切暂停/快进打爆服务端数据库。 */
+        private const val PROGRESS_MIN_INTERVAL_MS = 3_000L
 
         /** 网速采样间隔：0.5 秒。够跟手，也不会让老机器一直重绘。 */
         private const val SPEED_INTERVAL_MS = 500L

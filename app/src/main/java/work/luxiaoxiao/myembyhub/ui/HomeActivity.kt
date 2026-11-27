@@ -1770,7 +1770,7 @@ class HomeActivity : Activity() {
         val page = tabIndex
         showLoading(true, page)
         worker.execute {
-            val r = api.resolvePlayback(item, item.mediaSourceId)
+            val r = api.resolvePlayback(item, item.mediaSourceId, startMs * 10_000L)
             main.post {
                 showLoading(false, page)
                 val plan = r.getOrNull()
@@ -1799,6 +1799,7 @@ class HomeActivity : Activity() {
         if (plan.playSessionId.isNotEmpty()) {
             i.putExtra(PlayerActivity.EXTRA_PLAY_SESSION_ID, plan.playSessionId)
         }
+        i.putExtra(PlayerActivity.EXTRA_PLAY_METHOD, plan.playMethod)
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
         startActivityForResult(i, REQ_PLAY)
     }
@@ -2214,6 +2215,8 @@ class HomeActivity : Activity() {
 
     private fun confirmLogout() {
         TvDialog.confirm(this, "退出登录", "确定要退出当前账号吗？", "退出", "取消") {
+            val logoutApi = EmbyApi(this, session.server, session.token, session.userId)
+            worker.execute { logoutApi.logout() }
             EmbyHttpDataSource.clearIdlePool()
             ImageLoader.get(this).clearMemCache()
             session.clear()

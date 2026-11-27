@@ -48,22 +48,52 @@ class EmbyApi(
     companion object {
         private const val TAG = "EmbyApi"
         private const val CLIENT_NAME = "MyEmbyHub"
-        private const val CLIENT_VERSION = "1.0.0"
-        private const val DEVICE_ID = "myembyhub-tv"
 
         /**
-         * 兜底用户 id，仅在 [userId] 为空时使用（老版本升级上来的会话）。
-         * 用它会拿不到「最近观看」，但至少列表能显示。
+         * 兜底用户 id，仅在 [userId] 为空且 `/Users/Me` 也取不到时使用。
          */
         const val FALLBACK_USER_ID = "00000000000000000000000000000000"
+
+        /** 统一构造 Emby 标准 `X-Emby-Authorization` 头。 */
+        fun authHeader(ctx: Context, token: String = ""): String {
+            val deviceId = Session.get(ctx).deviceId
+            val device = sanitizeHeaderToken(android.os.Build.MODEL).ifEmpty { "AndroidTV" }
+            val version = sanitizeHeaderToken(work.luxiaoxiao.myembyhub.BuildConfig.VERSION_NAME).ifEmpty { "1.0.0" }
+            return buildEmbyAuthHeader(
+                client = CLIENT_NAME,
+                device = device,
+                deviceId = deviceId,
+                version = version,
+                token = token
+            )
+        }
     }
 
-    /** 实际使用的用户 id：优先真实 id，取不到才退回兜底值。 */
-    private fun uid(): String = userId.ifEmpty { FALLBACK_USER_ID }
+    @Volatile
+    private var userIdResolvedAttempted = false
+
+    /** 实际使用的用户 id：优先真实 id，缺失时尝试通过 `/Users/Me` 补齐。 */
+    private fun uid(): String {
+        if (userId.isNotEmpty()) return userId
+        if (!userIdResolvedAttempted && token.isNotEmpty() && server.isNotEmpty()) {
+            userIdResolvedAttempted = true
+            try {
+                val resp = get("/Users/Me")
+                val id = org.json.JSONObject(resp.body).optString("Id")
+                if (id.isNotEmpty()) {
+                    userId = id
+                    try { Session.get(ctx).userId = id } catch (_: Throwable) {}
+                    return id
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "补取 /Users/Me 失败: ${e.message}")
+            }
+        }
+        return userId.ifEmpty { FALLBACK_USER_ID }
+    }
 
     /** 统一的鉴权头。 */
-    private fun authHeader(): String =
-        "MediaBrowser Client=\"$CLIENT_NAME\", Device=\"TV\", DeviceId=\"$DEVICE_ID\", Version=\"$CLIENT_VERSION\""
+    private fun authHeader(): String = authHeader(ctx, token)
 
     /** 规范化服务器地址：去掉末尾斜杠，补上 https://。 */
     fun normalize(raw: String): String {
@@ -128,6 +158,20 @@ class EmbyApi(
             }
         } catch (e: Throwable) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * 通知服务端注销当前会话（`POST /Sessions/Logout`）。
+     *
+     * 失败只记日志：网络断开时不能阻止用户本地退出登录。
+     */
+    fun logout() {
+        if (token.isEmpty() || normalize(server).isEmpty()) return
+        try {
+            requestEmpty("POST", "/Sessions/Logout")
+        } catch (e: Throwable) {
+            Log.w(TAG, "退出登录上报失败: ${e.message}")
         }
     }
 
@@ -239,6 +283,14 @@ class EmbyApi(
             }
         }
         val ud = o.optJSONObject("UserData")
+        val imgTags = o.optJSONObject("ImageTags")
+        val primaryImageTag = imgTags?.optString("Primary").orEmpty()
+        val backdropTags = o.optJSONArray("BackdropImageTags")
+        val backdropImageTag = if (backdropTags != null && backdropTags.length() > 0) {
+            backdropTags.optString(0).orEmpty()
+        } else {
+            ""
+        }
         // 类型标签在 Emby 里是数组（["科幻","悬疑"]），拼成一行直接给 TextView 用。
         // 分隔符用全角斜杠而不是逗号 —— 中文片名里逗号太常见，会跟标题混在一起。
         val genresArr = o.optJSONArray("Genres")
@@ -271,7 +323,9 @@ class EmbyApi(
             productionYear = o.optInt("ProductionYear", 0),
             officialRating = o.optString("OfficialRating"),
             communityRating = o.optDouble("CommunityRating", 0.0),
-            genres = genres
+            genres = genres,
+            primaryImageTag = primaryImageTag,
+            backdropImageTag = backdropImageTag
         )
     }
 
@@ -310,22 +364,16 @@ class EmbyApi(
         startIndex: Int = 0
     ): Result<List<MediaItem>> {
         return try {
-            // ⚠️ **不要加 `MediaTypes=Video`**：
-            //    剧（Series）和季（Season）的 MediaType 不是 Video，
-            //    加了这个过滤会把「剧 → 季 → 集」的分层结构整层抹掉 →
-            //    剧集库里第一层就空了（动画电影库因为直接是 Movie 所以看着正常）。
-            //    `IncludeMedia=Video` 只影响「是否附带媒体信息」，不影响条目类型，可以留。
-            val filter = if (includeVideo) "&IncludeMedia=Video" else ""
             // ⚠️ 递归列库时**必须**带 `IncludeItemTypes`：
-            //    这个 Emby 库里每个影片外面还套了一层同名文件夹
-            //    （「恐怖X档案 (2022)」folder 里面才是 Movie「恐怖X档案」），
+            //    某些 Emby 库里每个影片外面还套了一层同名文件夹，
             //    不带类型过滤就会拿回一半「文件夹」，海报墙上出现两套同名卡片。
+            //    注意不要传非标准的 `IncludeMedia=Video`，也不要加 `MediaTypes=Video`（会过滤掉 Series/Season）。
             val types = if (includeItemTypes.isNotEmpty()) "&IncludeItemTypes=$includeItemTypes" else ""
             val order = if (descending) "Descending" else "Ascending"
             // StartIndex 用于海报墙翻页（Emby 默认从 0 开始）
             val start = if (startIndex > 0) "&StartIndex=$startIndex" else ""
             val resp = get(
-                "/Users/${uid()}/Items?ParentId=$parentId&Recursive=$recursive$filter$types&Limit=$limit" +
+                "/Users/${uid()}/Items?ParentId=${urlEncode(parentId)}&Recursive=$recursive$types&Limit=$limit" +
                     "&Fields=$LIST_FIELDS&SortBy=$sortBy&SortOrder=$order$start"
             )
             Result.success(parseItems(resp.body))
@@ -338,16 +386,18 @@ class EmbyApi(
      * 搜索。
      *
      * Emby 的 `/Items?SearchTerm=` 支持模糊匹配（部分标题、演员名也能命中）。
+     * 用标准 `IncludeItemTypes=Movie,Series,Episode,Video` 过滤掉普通文件夹，同时保留电视剧本体（Series）。
      */
     fun search(term: String, limit: Int = 40): Result<List<MediaItem>> {
         return try {
             val t = term.trim()
             if (t.isEmpty()) return Result.success(emptyList())
             val resp = get(
-                "/Users/${uid()}/Items?SearchTerm=${java.net.URLEncoder.encode(t, "UTF-8")}" +
-                    "&Recursive=true&IncludeMedia=Video&Limit=$limit&Fields=$LIST_FIELDS&SortBy=SortName"
+                "/Users/${uid()}/Items?SearchTerm=${urlEncode(t)}" +
+                    "&Recursive=true&IncludeItemTypes=Movie,Series,Episode,Video&Limit=$limit" +
+                    "&Fields=$LIST_FIELDS&SortBy=SortName"
             )
-            Result.success(parseItems(resp.body, skipFolders = true))
+            Result.success(parseItems(resp.body))
         } catch (e: Throwable) {
             Result.failure(e)
         }
@@ -409,7 +459,8 @@ class EmbyApi(
     fun firstEpisode(seriesId: String): Result<MediaItem?> {
         return try {
             val resp = get(
-                "/Shows/$seriesId/Episodes?UserId=${uid()}&Limit=1&SortBy=IndexNumber&Fields=$PLAYABLE_LIST_FIELDS"
+                "/Shows/$seriesId/Episodes?UserId=${uid()}&Limit=1" +
+                    "&SortBy=ParentIndexNumber,IndexNumber&Fields=$PLAYABLE_LIST_FIELDS"
             )
             Result.success(parseItems(resp.body).firstOrNull())
         } catch (e: Throwable) {
@@ -420,49 +471,42 @@ class EmbyApi(
     /**
      * 拼取流地址。
      *
-     * ⚠️ `static=true` 是**直放原文件**（不转码），配合自写 DataSource 播 mkv/mp4。
-     * 转码地址（`/Videos/{id}/master.m3u8`）需要服务端起 ffmpeg，4K 这类片源才用。
-     *
-     * ⚠️ **`mediaSourceId` 是必需的，不是「带上更稳」**（2026-11-05 实测更正）：
-     * 少了它，`tv.example.com` 照样 302 到 `v10.example.com`，但 v10 直接回
-     * `HTTP 404 Not Found`；补上就 200。所以调用方必须先保证这个值非空
-     * （见 `HomeActivity.play()` 里的补取逻辑）。
+     * ⚠️ `Static=true` 是**直放原文件**（不转码），配合自写 DataSource 播 mkv/mp4。
      *
      * @param mediaSourceId 覆盖条目自带的 mediaSourceId（补取到的值走这里传）。
      */
     fun streamUrl(item: MediaItem, mediaSourceId: String = item.mediaSourceId): String {
-        return buildFallbackStreamUrl(normalize(server), item.id, mediaSourceId)
+        return buildFallbackStreamUrl(normalize(server), item.id, mediaSourceId, item.container)
     }
 
     /**
      * 标准 Emby/Jellyfin 播放信息协商：`POST /Items/{id}/PlaybackInfo`。
      *
      * 部分服务端（如 smartstrm / 302 反代）依赖客户端先发 PlaybackInfo 才会返回真实的
-     * `DirectStreamUrl`（例如 `/smartstrm?item_id=...`）；直接硬拼 `/Videos/{id}/stream`
-     * 可能绕开分流逻辑甚至被重定向到错误文件。
+     * `DirectStreamUrl`（例如 `/smartstrm?item_id=...`）；同时部分反代只读 query 参数，
+     * 因此标准参数在 query 与 JSON body 中均按规范传入。
      */
-    fun playbackInfo(itemId: String, mediaSourceId: String = ""): Result<PlaybackPlan> {
+    fun playbackInfo(
+        itemId: String,
+        mediaSourceId: String = "",
+        startTimeTicks: Long = 0L
+    ): Result<PlaybackPlan> {
         val base = normalize(server)
         if (base.isEmpty()) return Result.failure(IllegalArgumentException("服务器地址为空"))
         return try {
-            val profile = org.json.JSONObject().apply {
-                put("MaxStreamingBitrate", 120_000_000)
-                put(
-                    "DirectPlayProfiles",
-                    org.json.JSONArray().apply {
-                        put(org.json.JSONObject().put("Type", "Video"))
-                        put(org.json.JSONObject().put("Type", "Audio"))
-                    }
-                )
-            }
-            val payload = org.json.JSONObject().apply {
-                put("UserId", uid())
-                put("IsPlayback", true)
-                put("AutoOpenLiveStream", false)
-                if (mediaSourceId.isNotEmpty()) put("MediaSourceId", mediaSourceId)
-                put("DeviceProfile", profile)
-            }.toString()
-            val resp = post("/Items/$itemId/PlaybackInfo?UserId=${uid()}", payload)
+            val userIdVal = uid()
+            val payload = buildPlaybackInfoPayload(
+                userId = userIdVal,
+                mediaSourceId = mediaSourceId,
+                startTimeTicks = startTimeTicks
+            )
+            val path = buildPlaybackInfoPath(
+                itemId = itemId,
+                userId = userIdVal,
+                mediaSourceId = mediaSourceId,
+                startTimeTicks = startTimeTicks
+            )
+            val resp = post(path, payload)
             val plan = parsePlaybackPlan(base, itemId, mediaSourceId, resp.body)
                 ?: return Result.failure(IllegalStateException("PlaybackInfo 未返回可用的媒体源"))
             Result.success(plan)
@@ -472,29 +516,43 @@ class EmbyApi(
     }
 
     /**
-     * 解析最终播放地址：优先走标准 `PlaybackInfo`，若服务端不支持或没给媒体源再回退到旧直连地址。
+     * 解析最终播放地址：严格优先走标准 `PlaybackInfo`。
+     *
+     * 只有当服务端明确不支持该接口（HTTP 404/405）时才回退到旧直连地址；
+     * 若服务端返回 `ErrorCode`、401/403/429/5xx 等拒绝或错误，绝不绕过协商强行直拉流。
      */
-    fun resolvePlayback(item: MediaItem, mediaSourceId: String = item.mediaSourceId): Result<PlaybackPlan> {
-        val infoRes = playbackInfo(item.id, mediaSourceId)
+    fun resolvePlayback(
+        item: MediaItem,
+        mediaSourceId: String = item.mediaSourceId,
+        startTimeTicks: Long = item.positionTicks
+    ): Result<PlaybackPlan> {
+        val infoRes = playbackInfo(item.id, mediaSourceId, startTimeTicks)
         infoRes.getOrNull()?.let { return Result.success(it) }
         val infoErr = infoRes.exceptionOrNull()
-        if (isAuthExpired(infoErr)) return Result.failure(infoErr!!)
+        if (!shouldFallbackFromPlaybackInfo(infoErr)) {
+            return Result.failure(infoErr ?: IllegalStateException("获取播放信息失败"))
+        }
 
         var msId = mediaSourceId
+        var container = item.container
         if (msId.isEmpty()) {
             val detailRes = itemDetail(item.id)
             val detailErr = detailRes.exceptionOrNull()
             if (isAuthExpired(detailErr)) return Result.failure(detailErr!!)
-            msId = detailRes.getOrNull()?.mediaSourceId.orEmpty()
+            val detail = detailRes.getOrNull()
+            msId = detail?.mediaSourceId.orEmpty()
+            if (container.isEmpty()) container = detail?.container.orEmpty()
         }
         if (msId.isEmpty()) {
             return Result.failure(infoErr ?: IllegalStateException("没有可播放的媒体源"))
         }
         return Result.success(
             PlaybackPlan(
-                url = streamUrl(item, msId),
+                url = buildFallbackStreamUrl(normalize(server), item.id, msId, container),
                 mediaSourceId = msId,
-                playSessionId = ""
+                playSessionId = "",
+                playMethod = "DirectPlay",
+                container = container
             )
         )
     }
@@ -507,16 +565,57 @@ class EmbyApi(
      *
      * 失败只记日志：上报出问题不能影响播放本身。
      */
-    fun reportStart(item: MediaItem, playSessionId: String) {
-        reportPlayback("/Sessions/Playing", item, item.positionTicks, playSessionId, paused = false)
+    fun reportStart(
+        item: MediaItem,
+        positionTicks: Long,
+        playSessionId: String,
+        playMethod: String = "DirectPlay"
+    ) {
+        reportPlayback(
+            path = "/Sessions/Playing",
+            item = item,
+            positionTicks = positionTicks,
+            playSessionId = playSessionId,
+            paused = false,
+            eventName = null,
+            playMethod = playMethod
+        )
     }
 
-    fun reportProgress(item: MediaItem, positionTicks: Long, paused: Boolean, playSessionId: String) {
-        reportPlayback("/Sessions/Playing/Progress", item, positionTicks, playSessionId, paused)
+    fun reportProgress(
+        item: MediaItem,
+        positionTicks: Long,
+        paused: Boolean,
+        playSessionId: String,
+        eventName: String = "TimeUpdate",
+        playMethod: String = "DirectPlay"
+    ) {
+        reportPlayback(
+            path = "/Sessions/Playing/Progress",
+            item = item,
+            positionTicks = positionTicks,
+            playSessionId = playSessionId,
+            paused = paused,
+            eventName = eventName,
+            playMethod = playMethod
+        )
     }
 
-    fun reportStopped(item: MediaItem, positionTicks: Long, playSessionId: String) {
-        reportPlayback("/Sessions/Playing/Stopped", item, positionTicks, playSessionId, paused = true)
+    fun reportStopped(
+        item: MediaItem,
+        positionTicks: Long,
+        playSessionId: String,
+        playMethod: String = "DirectPlay"
+    ) {
+        reportPlayback(
+            path = "/Sessions/Playing/Stopped",
+            item = item,
+            positionTicks = positionTicks,
+            playSessionId = playSessionId,
+            paused = true,
+            eventName = null,
+            playMethod = playMethod
+        )
     }
 
     // ==================== 用户状态（收藏 / 已看 / 移除继续观看） ====================
@@ -568,20 +667,21 @@ class EmbyApi(
         item: MediaItem,
         positionTicks: Long,
         playSessionId: String,
-        paused: Boolean
+        paused: Boolean,
+        eventName: String?,
+        playMethod: String
     ) {
         try {
-            val body = org.json.JSONObject().apply {
-                put("ItemId", item.id)
-                if (item.mediaSourceId.isNotEmpty()) put("MediaSourceId", item.mediaSourceId)
-                put("PlaySessionId", playSessionId)
-                put("PositionTicks", positionTicks)
-                put("CanSeek", true)
-                put("IsPaused", paused)
-                put("IsMuted", false)
-                put("PlayMethod", "DirectPlay")
-                put("RepeatMode", "RepeatNone")
-            }.toString()
+            val body = buildPlaybackReportBody(
+                path = path,
+                itemId = item.id,
+                mediaSourceId = item.mediaSourceId,
+                playSessionId = playSessionId,
+                positionTicks = positionTicks,
+                paused = paused,
+                eventName = eventName,
+                playMethod = playMethod
+            )
             postJson(path, body)
         } catch (e: Throwable) {
             Log.w(TAG, "播放上报失败 $path: ${e.message}")
@@ -980,7 +1080,11 @@ data class MediaItem(
     /** 评分（0~10），0 表示没有。 */
     val communityRating: Double = 0.0,
     /** 类型标签，已拼成「科幻 / 悬疑」这种可直接显示的样子。 */
-    val genres: String = ""
+    val genres: String = "",
+    /** Primary 图片 tag（用于标准图片 URL 缓存与刷新）。 */
+    val primaryImageTag: String = "",
+    /** 第一张 Backdrop 图片 tag。 */
+    val backdropImageTag: String = ""
 ) {
     /** 续播起点（毫秒）。 */
     val resumeMs: Long get() = positionTicks / 10_000
@@ -1043,13 +1147,167 @@ data class MediaItem(
 data class PlaybackPlan(
     val url: String,
     val mediaSourceId: String,
-    val playSessionId: String
+    val playSessionId: String,
+    val playMethod: String = "DirectPlay",
+    val container: String = ""
 )
 
-internal fun buildFallbackStreamUrl(serverBase: String, itemId: String, mediaSourceId: String): String {
+class PlaybackInfoRejectedException(val errorCode: String) :
+    IllegalStateException("服务端拒绝播放：$errorCode")
+
+private const val MAX_STREAMING_BITRATE = 120_000_000
+
+internal fun sanitizeHeaderToken(raw: String?): String {
+    if (raw.isNullOrBlank()) return ""
+    return raw.replace("\"", "")
+        .replace('\r', ' ')
+        .replace('\n', ' ')
+        .trim()
+}
+
+internal fun buildEmbyAuthHeader(
+    client: String,
+    device: String,
+    deviceId: String,
+    version: String,
+    token: String = ""
+): String {
+    val sb = StringBuilder()
+    sb.append("MediaBrowser Client=\"").append(sanitizeHeaderToken(client))
+        .append("\", Device=\"").append(sanitizeHeaderToken(device).ifEmpty { "AndroidTV" })
+        .append("\", DeviceId=\"").append(sanitizeHeaderToken(deviceId))
+        .append("\", Version=\"").append(sanitizeHeaderToken(version).ifEmpty { "1.0.0" })
+        .append('"')
+    val cleanToken = sanitizeHeaderToken(token)
+    if (cleanToken.isNotEmpty()) {
+        sb.append(", Token=\"").append(cleanToken).append('"')
+    }
+    return sb.toString()
+}
+
+internal fun urlEncode(value: String): String =
+    java.net.URLEncoder.encode(value, "UTF-8")
+
+internal fun buildPlaybackInfoPath(
+    itemId: String,
+    userId: String,
+    mediaSourceId: String = "",
+    startTimeTicks: Long = 0L
+): String {
+    val sb = StringBuilder("/Items/")
+        .append(itemId)
+        .append("/PlaybackInfo?UserId=").append(urlEncode(userId))
+        .append("&IsPlayback=true&AutoOpenLiveStream=false")
+        .append("&MaxStreamingBitrate=").append(MAX_STREAMING_BITRATE)
+    if (mediaSourceId.isNotEmpty()) {
+        sb.append("&MediaSourceId=").append(urlEncode(mediaSourceId))
+    }
+    if (startTimeTicks > 0L) {
+        sb.append("&StartTimeTicks=").append(startTimeTicks)
+    }
+    return sb.toString()
+}
+
+internal fun buildPlaybackInfoPayload(
+    userId: String,
+    mediaSourceId: String = "",
+    startTimeTicks: Long = 0L
+): String {
+    val subtitleProfiles = org.json.JSONArray().apply {
+        for (fmt in listOf("srt", "subrip", "ass", "ssa", "vtt", "pgssub", "dvdsub")) {
+            put(org.json.JSONObject().put("Format", fmt).put("Method", "Embed"))
+        }
+        for (fmt in listOf("srt", "ass", "ssa", "vtt")) {
+            put(org.json.JSONObject().put("Format", fmt).put("Method", "External"))
+        }
+    }
+    val profile = org.json.JSONObject().apply {
+        put("MaxStreamingBitrate", MAX_STREAMING_BITRATE)
+        put(
+            "DirectPlayProfiles",
+            org.json.JSONArray().apply {
+                put(org.json.JSONObject().put("Type", "Video"))
+                put(org.json.JSONObject().put("Type", "Audio"))
+            }
+        )
+        put("SubtitleProfiles", subtitleProfiles)
+    }
+    return org.json.JSONObject().apply {
+        put("UserId", userId)
+        put("IsPlayback", true)
+        put("AutoOpenLiveStream", false)
+        put("MaxStreamingBitrate", MAX_STREAMING_BITRATE)
+        if (startTimeTicks > 0L) put("StartTimeTicks", startTimeTicks)
+        if (mediaSourceId.isNotEmpty()) put("MediaSourceId", mediaSourceId)
+        put("DeviceProfile", profile)
+    }.toString()
+}
+
+internal fun shouldFallbackFromPlaybackInfo(error: Throwable?): Boolean {
+    if (error == null || isAuthExpired(error) || error is PlaybackInfoRejectedException) return false
+    var cur: Throwable? = error
+    var depth = 0
+    while (cur != null && depth < 8) {
+        if (cur is PlaybackInfoRejectedException) return false
+        val msg = cur.message.orEmpty()
+        if (msg.contains("HTTP 404", ignoreCase = true) ||
+            msg.contains("HTTP 405", ignoreCase = true)
+        ) {
+            return true
+        }
+        cur = cur.cause
+        depth++
+    }
+    return false
+}
+
+internal fun buildPlaybackReportBody(
+    path: String,
+    itemId: String,
+    mediaSourceId: String,
+    playSessionId: String,
+    positionTicks: Long,
+    paused: Boolean,
+    eventName: String?,
+    playMethod: String
+): String {
+    val normalizedMethod = when (playMethod) {
+        "DirectPlay", "DirectStream", "Transcode" -> playMethod
+        else -> "DirectPlay"
+    }
+    val isStopped = path.endsWith("/Stopped", ignoreCase = true)
+    return org.json.JSONObject().apply {
+        put("ItemId", itemId)
+        if (mediaSourceId.isNotEmpty()) put("MediaSourceId", mediaSourceId)
+        if (playSessionId.isNotEmpty()) put("PlaySessionId", playSessionId)
+        put("PositionTicks", positionTicks.coerceAtLeast(0L))
+        if (!isStopped) {
+            put("CanSeek", true)
+            put("IsPaused", paused)
+            put("IsMuted", false)
+            put("PlayMethod", normalizedMethod)
+            put("RepeatMode", "RepeatNone")
+            if (!eventName.isNullOrEmpty()) put("EventName", eventName)
+        } else {
+            put("Failed", false)
+        }
+    }.toString()
+}
+
+internal fun buildFallbackStreamUrl(
+    serverBase: String,
+    itemId: String,
+    mediaSourceId: String,
+    container: String = "",
+    playSessionId: String = ""
+): String {
     val base = serverBase.trimEnd('/')
-    val ms = if (mediaSourceId.isNotEmpty()) "&mediaSourceId=$mediaSourceId" else ""
-    return "$base/Videos/$itemId/stream?static=true$ms"
+    val cleanContainer = container.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+    val ext = if (cleanContainer.isNotEmpty()) ".$cleanContainer" else ""
+    val sb = StringBuilder("$base/Videos/$itemId/stream$ext?Static=true")
+    if (mediaSourceId.isNotEmpty()) sb.append("&mediaSourceId=").append(urlEncode(mediaSourceId))
+    if (playSessionId.isNotEmpty()) sb.append("&PlaySessionId=").append(urlEncode(playSessionId))
+    return sb.toString()
 }
 
 internal fun resolveServerPath(serverBase: String, rawPath: String): String {
@@ -1081,6 +1339,10 @@ internal fun parsePlaybackPlan(
     body: String
 ): PlaybackPlan? {
     val obj = org.json.JSONObject(body)
+    val errorCode = obj.optString("ErrorCode").trim()
+    if (errorCode.isNotEmpty()) {
+        throw PlaybackInfoRejectedException(errorCode)
+    }
     val playSessionId = obj.optString("PlaySessionId")
     val sources = obj.optJSONArray("MediaSources") ?: return null
     if (sources.length() == 0) return null
@@ -1095,11 +1357,49 @@ internal fun parsePlaybackPlan(
         }
     }
     val msId = src.optString("Id").ifEmpty { preferredMediaSourceId }
+    val container = src.optString("Container").trim()
     val direct = src.optString("DirectStreamUrl").trim()
-    val url = if (direct.isNotEmpty()) {
-        resolveServerPath(serverBase, direct)
-    } else {
-        buildFallbackStreamUrl(serverBase, itemId, msId)
+    val transcoding = src.optString("TranscodingUrl").trim()
+    val supportsDirectPlay = src.optBoolean("SupportsDirectPlay", true)
+    val supportsDirectStream = src.optBoolean("SupportsDirectStream", direct.isNotEmpty())
+    val protocol = src.optString("Protocol").trim()
+    val rawPath = src.optString("Path").trim()
+
+    if (direct.isNotEmpty()) {
+        val method = if (supportsDirectPlay && !supportsDirectStream) "DirectPlay" else "DirectStream"
+        return PlaybackPlan(
+            url = resolveServerPath(serverBase, direct),
+            mediaSourceId = msId,
+            playSessionId = playSessionId,
+            playMethod = method,
+            container = container
+        )
     }
-    return PlaybackPlan(url = url, mediaSourceId = msId, playSessionId = playSessionId)
+    if (supportsDirectPlay) {
+        val url = if (protocol.equals("Http", ignoreCase = true) &&
+            (rawPath.startsWith("http://", ignoreCase = true) ||
+                rawPath.startsWith("https://", ignoreCase = true))
+        ) {
+            rawPath
+        } else {
+            buildFallbackStreamUrl(serverBase, itemId, msId, container, playSessionId)
+        }
+        return PlaybackPlan(
+            url = url,
+            mediaSourceId = msId,
+            playSessionId = playSessionId,
+            playMethod = "DirectPlay",
+            container = container
+        )
+    }
+    if (transcoding.isNotEmpty()) {
+        return PlaybackPlan(
+            url = resolveServerPath(serverBase, transcoding),
+            mediaSourceId = msId,
+            playSessionId = playSessionId,
+            playMethod = "Transcode",
+            container = container
+        )
+    }
+    return null
 }

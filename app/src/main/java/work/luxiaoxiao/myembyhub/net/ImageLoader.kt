@@ -174,9 +174,10 @@ class ImageLoader private constructor(private val ctx: Context) {
         imageType: String = "Primary",
         targetWidth: Int = 320,
         forceRefresh: Boolean = false,
+        tag: String = "",
         callback: Callback
     ): Request {
-        val key = "$imageType:$itemId:$targetWidth"
+        val key = if (tag.isNotEmpty()) "$imageType:$itemId:$targetWidth:$tag" else "$imageType:$itemId:$targetWidth"
         val req = Request(key)
         if (itemId.isEmpty()) {
             callback.onBitmap(null)
@@ -239,7 +240,7 @@ class ImageLoader private constructor(private val ctx: Context) {
                             cancelledAll = true
                             return@execute
                         }
-                        val fetched = fetch(itemId, imageType, targetWidth)
+                        val fetched = fetch(itemId, imageType, targetWidth, tag)
                         if (fetched != null) {
                             bmp = fetched.bitmap
                             memCache.put(key, fetched.bitmap)
@@ -273,16 +274,17 @@ class ImageLoader private constructor(private val ctx: Context) {
     }
 
     /** 取横版背景图（详情页用）。 */
-    fun loadBackdrop(itemId: String, targetWidth: Int = 1280, callback: Callback): Request =
-        load(itemId, "Backdrop", targetWidth, false, callback)
+    fun loadBackdrop(itemId: String, targetWidth: Int = 1280, tag: String = "", callback: Callback): Request =
+        load(itemId, "Backdrop", targetWidth, false, tag, callback)
 
     // ==================== 内部 ====================
 
-    private fun fetch(itemId: String, imageType: String, targetWidth: Int): Fetched? {
-        val server = Session.get(ctx).server
+    private fun fetch(itemId: String, imageType: String, targetWidth: Int, tag: String): Fetched? {
+        val server = Session.get(ctx).server.trimEnd('/')
         if (server.isEmpty()) return null
-        // 服务端按显示尺寸出图，避免下原图；缩略图用 q80 兼顾清晰度与带宽/磁盘
-        val url = "$server/Items/$itemId/Images/$imageType?maxWidth=$targetWidth&quality=80&fillWidth=$targetWidth"
+        // 标准 Emby 按宽等比缩放接口：maxWidth + quality + 可选 tag（不再附带多余的 fillWidth）
+        val tagParam = if (tag.isNotEmpty()) "&tag=${urlEncode(tag)}" else ""
+        val url = "$server/Items/$itemId/Images/$imageType?maxWidth=$targetWidth&quality=80$tagParam"
         val host = try {
             UrlKit.parse(server).host
         } catch (e: Throwable) {
@@ -306,11 +308,13 @@ class ImageLoader private constructor(private val ctx: Context) {
         targetWidth: Int,
         factory: javax.net.ssl.SSLSocketFactory?
     ): Fetched? {
+        val token = Session.get(ctx).token
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8000
             readTimeout = 15000
             setRequestProperty("Accept", "image/*")
-            setRequestProperty("X-Emby-Token", Session.get(ctx).token)
+            setRequestProperty("X-Emby-Authorization", EmbyApi.authHeader(ctx, token))
+            if (token.isNotEmpty()) setRequestProperty("X-Emby-Token", token)
             if (this is javax.net.ssl.HttpsURLConnection) {
                 // ⚠️ 同一个坑：必须抬到 TLS1.2，否则连不上（factory 已由 TlsStack 缓存复用）
                 sslSocketFactory = factory

@@ -387,7 +387,7 @@ class DetailActivity : Activity() {
         val target = playTarget ?: return
         tvLoading.visibility = View.VISIBLE
         worker.execute {
-            val r = api.resolvePlayback(target, target.mediaSourceId)
+            val r = api.resolvePlayback(target, target.mediaSourceId, playStartMs * 10_000L)
             main.post {
                 tvLoading.visibility = View.GONE
                 val plan = r.getOrNull()
@@ -416,6 +416,7 @@ class DetailActivity : Activity() {
         if (plan.playSessionId.isNotEmpty()) {
             i.putExtra(PlayerActivity.EXTRA_PLAY_SESSION_ID, plan.playSessionId)
         }
+        i.putExtra(PlayerActivity.EXTRA_PLAY_METHOD, plan.playMethod)
         i.putExtra(PlayerActivity.EXTRA_START_MS, startMs)
         // 详情页手里已经有整季的剧集列表，直接传给播放器 ——
         // 不传的话播放器还要「详情 → seriesId → 剧集列表」多跑两次请求，
